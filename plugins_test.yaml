@@ -1,0 +1,77 @@
+plugins:
+  # ----------------------------------------------------------------
+  # Infrastructure Worker: NVIDIA Monitor
+  # GPU subtree attribution for empirical resource tracking (CR-7).
+  # Load FIRST (before the GPU forced-aligner) so its samples record
+  # gpu_memory_mb_peak — scale evidence from the Supernova decomp runs.
+  # ----------------------------------------------------------------
+  - name: sys-mon-nvidia
+    env_name: test-sys-mon
+
+    # Environment File
+    env_file: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-system-monitor-nvidia/environment.yml"
+
+    # The Plugin Package (local source)
+    package: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-system-monitor-nvidia/"
+
+    # Interface Libraries
+    interface_libs:
+      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-plugin-system/"
+      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-infra-plugin-system/"
+
+  # ----------------------------------------------------------------
+  # Media Analysis: Silero VAD
+  # Per-segment speech detection (segment-local chunks for 1:1 alignment).
+  # CPU-based (bundled wheel weights).
+  # ----------------------------------------------------------------
+  - name: silero-vad
+    env_name: test-silero-vad
+
+    # Environment File
+    env_file: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-media-plugin-silero-vad/environment.yml"
+
+    # The Plugin Package (local source)
+    package: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-media-plugin-silero-vad/"
+
+    # Interface Libraries
+    interface_libs:
+      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-plugin-system/"
+      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-media-plugin-system/"
+
+  # ----------------------------------------------------------------
+  # AI Worker: Qwen3 Forced Aligner (Qwen3-ForcedAligner-0.6B)
+  # Word-level audio-text alignment per ~5-minute pipeline segment
+  # (300s is the model's recommended upper limit for optimal performance).
+  # GPU; model downloads on first run.
+  # ----------------------------------------------------------------
+  - name: qwen3-forced-aligner
+    env_name: test-qwen3-fa
+
+    # Environment File (System Deps)
+    env_file: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-transcription-plugin-qwen3-forced-aligner/environment.yml"
+
+    # The Plugin Package (local source)
+    package: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-transcription-plugin-qwen3-forced-aligner/"
+
+    # Interface Libraries
+    interface_libs:
+      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-plugin-system/"
+      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-transcription-plugin-system/"
+
+  # ----------------------------------------------------------------
+  # Context Graph: SQLite Graph
+  # Stores the Document + Segment spine (STARTS_WITH / NEXT / PART_OF).
+  # ----------------------------------------------------------------
+  - name: sqlite-graph
+    env_name: test-sqlite-graph
+
+    # Environment File
+    env_file: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-graph-plugin-sqlite/environment.yml"
+
+    # The Plugin Package (local source)
+    package: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-graph-plugin-sqlite/"
+
+    # Interface Libraries
+    interface_libs:
+      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-plugin-system/"
+      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-graph-plugin-system/"

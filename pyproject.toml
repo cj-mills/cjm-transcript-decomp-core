@@ -15,11 +15,18 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
 ]
-dependencies = ["cjm_plugin_system>=0.0.39"]
+dependencies = [
+    "cjm_plugin_system>=0.0.39",
+    "cjm_graph_domains>=0.0.4",
+    "cjm_graph_plugin_system>=0.0.6",
+]
 
 [project.urls]
 Repository = "https://github.com/cj-mills/cjm-transcript-decomp-core"
 Documentation = "https://cj-mills.github.io/cjm-transcript-decomp-core/"
+
+[project.scripts]
+cjm-transcript-decomp-core = "cjm_transcript_decomp_core.cli:main"
 
 [project.entry-points.nbdev]
 cjm_transcript_decomp_core = "cjm_transcript_decomp_core._modidx:d"
@@ -28,6 +35,6 @@ cjm_transcript_decomp_core = "cjm_transcript_decomp_core._modidx:d"
 version = {attr = "cjm_transcript_decomp_core.__version__"}
 
 [tool.setuptools.packages.find]
-include = ["cjm_transcript_decomp_core"]
+include = ["cjm_transcript_decomp_core*"]
 
 [tool.nbdev]

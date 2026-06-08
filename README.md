@@ -8,3 +8,587 @@
 ``` bash
 pip install cjm_transcript_decomp_core
 ```
+
+## Project Structure
+
+    nbs/
+    ├── alignment.ipynb # Pure forced-alignment logic (no capability calls): map FA words back to character spans
+    ├── cli.ipynb       # The CLI driver — the decomposition core's first (and currently only) frontend.
+    ├── graph.ipynb     # Graph-spine construction, commit, and skeptical-lens verification. Builds Document +
+    ├── models.ipynb    # Lean data shapes for the transcript-decomposition pipeline: in-core mirrors of the
+    └── pipeline.ipynb  # The headless decomposition pipeline: load a transcription run manifest, then per source
+
+Total: 5 notebooks
+
+## Module Dependencies
+
+``` mermaid
+graph LR
+    alignment["alignment<br/>alignment"]
+    cli["cli<br/>cli"]
+    graph_mod["graph<br/>graph"]
+    models["models<br/>models"]
+    pipeline["pipeline<br/>pipeline"]
+
+    alignment --> models
+    cli --> pipeline
+    cli --> models
+    graph_mod --> models
+    pipeline --> alignment
+    pipeline --> models
+    pipeline --> graph_mod
+```
+
+*7 cross-module dependencies detected*
+
+## CLI Reference
+
+No CLI commands found in this project.
+
+## Module Overview
+
+Detailed documentation for each module in the project:
+
+### alignment (`alignment.ipynb`)
+
+> Pure forced-alignment logic (no capability calls): map FA words back
+> to character spans
+
+#### Import
+
+``` python
+from cjm_transcript_decomp_core.alignment import (
+    map_fa_words_to_text,
+    assign_words_to_chunks,
+    build_segments_from_alignment,
+    tier1_alignment_checks
+)
+```
+
+#### Functions
+
+``` python
+def _strip_punct(
+    text: str,  # Text to normalize
+) -> str:  # Text with punctuation removed
+    "Strip punctuation from text for comparison with FA output."
+```
+
+``` python
+def map_fa_words_to_text(
+    text: str,             # Original text with punctuation
+    fa_items: List[FAWord],  # FA word-level alignment results
+) -> List[Tuple[int, int]]:  # (start_char, end_char) spans into the original text
+    """
+    Map forced-alignment words back to character spans in the original text.
+    
+    Walks the original text, matching each FA word (punctuation-stripped) against
+    original-text tokens; returns character offset pairs for each FA word.
+    """
+```
+
+``` python
+def assign_words_to_chunks(
+    fa_items: List[FAWord],     # FA word-level alignment results
+    vad_chunks: List[VADChunk],  # VAD chunks with start/end times
+) -> List[int]:  # Chunk index for each FA word
+    """
+    Assign each FA word to a VAD chunk by timestamp overlap.
+    
+    Words whose start_time falls within a chunk's [start, end] are assigned to
+    that chunk; words in silence gaps go to the nearest chunk by time proximity.
+    """
+```
+
+``` python
+def build_segments_from_alignment(
+    text: str,                      # Original text with punctuation
+    spans: List[Tuple[int, int]],   # Character spans from map_fa_words_to_text
+    assignments: List[int],         # Chunk index per word from assign_words_to_chunks
+    num_chunks: int,                # Total number of VAD chunks
+    source_id: Optional[str] = None,           # Source row id for traceability
+    source_provider_id: Optional[str] = None,  # Source provider identifier
+) -> List[TextSegment]:  # One segment per VAD chunk
+    """
+    Build a TextSegment per VAD chunk by grouping words by chunk assignment.
+    
+    Each chunk's text is the original (punctuated) slice from the first to the
+    last word assigned to it; chunks with no words become empty segments.
+    """
+```
+
+``` python
+def tier1_alignment_checks(
+    segments: List[TextSegment],  # Segments produced by build_segments_from_alignment
+    vad_chunks: List[VADChunk],   # The VAD chunks they were aligned to
+) -> List[str]:  # Human-readable warnings (empty = all clear)
+    "Tier-1 deterministic pre-filters for the alignment-review seam (no AI)."
+```
+
+#### Variables
+
+``` python
+_PUNCT_RE
+```
+
+### cli (`cli.ipynb`)
+
+> The CLI driver — the decomposition core’s first (and currently only)
+> frontend.
+
+#### Import
+
+``` python
+from cjm_transcript_decomp_core.cli import (
+    logger,
+    build_parser,
+    load_capabilities,
+    run_command,
+    main
+)
+```
+
+#### Functions
+
+``` python
+def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
+    "Build the CLI parser (subcommands: run)."
+```
+
+``` python
+def load_capabilities(
+    manager: PluginManager,   # Freshly constructed manager
+    instance_ids: List[str],  # Capability names to load (default instances), in order
+) -> None
+    "Discover manifests + load each requested capability (default instance)."
+```
+
+``` python
+async def run_command(
+    args: argparse.Namespace,  # Parsed CLI arguments for the `run` subcommand
+) -> int:  # Process exit code (0 = all sources decomposed + committed)
+    "Execute the `run` subcommand: decompose a transcription manifest into a graph spine."
+```
+
+``` python
+def main(
+    argv: Optional[List[str]] = None,  # Argument list override (None = sys.argv)
+) -> int:  # Process exit code
+    "CLI entry point (console script: `cjm-transcript-decomp-core`)."
+```
+
+### graph (`graph.ipynb`)
+
+> Graph-spine construction, commit, and skeptical-lens verification.
+> Builds Document +
+
+#### Import
+
+``` python
+from cjm_transcript_decomp_core.graph import (
+    build_source_ref,
+    build_graph_payload,
+    commit_graph,
+    VerificationResult,
+    verify_document
+)
+```
+
+#### Functions
+
+``` python
+def build_source_ref(
+    seg: DecompSegment,  # Aligned segment carrying upstream provenance
+    manifest_path: str,  # Path to the consumed transcription run manifest
+) -> Optional[SourceRef]:  # Provenance ref, or None when source info is absent
+    """
+    Build a manifest-anchored SourceRef for one segment.
+    
+    Revolution-1 provenance shape: anchor to the consumed run manifest rather
+    than the transcription DB row, because cache-hit transcriptions leave the
+    manifest job_id absent from the capability DB (E13 — manifest-vs-row dangle).
+    `plugin_name` reuses the `external:<path>` scheme (the canonical SourceRef
+    over-fit hack; direct CR-19 generalization evidence). `content_hash` verifies
+    the consumed text regardless of whether the row still exists.
+    """
+```
+
+``` python
+def build_graph_payload(
+    title: str,                     # Document title
+    segments: List[DecompSegment],  # Ordered aligned segments (source-coord timing)
+    manifest_path: str,             # Consumed manifest path (for SourceRefs)
+    media_type: str = "audio",      # Document media type
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str, List[str]]:  # (nodes, edges, doc_id, seg_ids)
+    """
+    Build the (nodes, edges, document_id, segment_ids) graph payload.
+    
+    Pure: assembles Document + Segment nodes and STARTS_WITH / NEXT / PART_OF
+    edges as wire dicts; no capability calls (commit happens in `commit_graph`).
+    """
+```
+
+``` python
+async def commit_graph(
+    queue: JobQueue,              # Started job queue
+    graph_id: str,               # Graph-storage capability id
+    nodes: List[Dict[str, Any]],  # Node wire dicts from build_graph_payload
+    edges: List[Dict[str, Any]],  # Edge wire dicts from build_graph_payload
+) -> Dict[str, int]:  # {"nodes": n, "edges": m} created counts
+    """
+    Commit nodes then edges to the graph capability via the job queue.
+    
+    Goes through `JobQueue` (not a direct `execute_plugin_async`) so graph writes
+    get empirical samples + sysmon attribution like every other capability call
+    (the GUI GraphService used the direct path — pass-2 two-invocation-paths note).
+    """
+```
+
+``` python
+async def verify_document(
+    queue: JobQueue,   # Started job queue
+    graph_id: str,     # Graph-storage capability id
+    document_id: str,  # Document node id to verify
+) -> Optional[VerificationResult]:  # Result, or None if the document is not found
+    """
+    Verify a committed document by querying the graph (depth-2 context).
+    
+    Skeptical lens: trusts the graph, not the run state — re-reads STARTS_WITH /
+    NEXT / PART_OF edges, timing, and source refs from storage. Depth 2 is needed
+    so the NEXT edges between discovered Segments are included.
+    """
+```
+
+#### Classes
+
+``` python
+@dataclass
+class VerificationResult:
+    "Skeptical-lens verification computed by querying the graph directly."
+    
+    document_id: str  # Verified Document node id
+    title: str  # Document title (read back from the graph)
+    segment_count: int  # Segment nodes found
+    has_starts_with: bool  # >=1 STARTS_WITH edge from the Document
+    next_chain_complete: bool  # NEXT edge count == segment_count - 1
+    part_of_complete: bool  # PART_OF edge count == segment_count
+    all_have_timing: bool  # Every segment has start_time + end_time
+    all_have_sources: bool  # Every segment has >=1 SourceRef
+    source_plugins: List[str] = field(...)  # Distinct source plugin_names
+    
+    def ok(self) -> bool:  # True when every structural check passes
+        "All structural checks pass."
+```
+
+### models (`models.ipynb`)
+
+> Lean data shapes for the transcript-decomposition pipeline: in-core
+> mirrors of the
+
+#### Import
+
+``` python
+from cjm_transcript_decomp_core.models import (
+    FAWord,
+    VADChunk,
+    TextSegment,
+    DecompSegment,
+    DecompConfig,
+    DecompDocument,
+    DecompManifest,
+    new_run_id
+)
+```
+
+#### Functions
+
+``` python
+def new_run_id() -> str:  # e.g. "decomp_20260607_153000_1a2b3c4d"
+    "Generate a unique, sortable decomposition run id."
+```
+
+#### Classes
+
+``` python
+@dataclass
+class FAWord:
+    """
+    One word-level forced-alignment result (segment-local times).
+    
+    Lean in-core mirror of the forced-alignment capability's `ForcedAlignItem`
+    wire shape, so the core needs no interface-library dependency for a
+    three-field DTO (pass-2 evidence: the typed FA result belongs to the
+    forced-alignment adapter interface).
+    """
+    
+    text: str  # The aligned word (punctuation typically stripped by the model)
+    start_time: float  # Word start in seconds (relative to the segment audio)
+    end_time: float  # Word end in seconds (relative to the segment audio)
+    
+    def from_wire(
+            cls,
+            d: Dict[str, Any],  # Capability wire dict
+        ) -> "FAWord":  # Parsed word (extra keys ignored)
+        "Build from a capability wire dict, tolerating extra keys."
+```
+
+``` python
+@dataclass
+class VADChunk:
+    "A voice-activity time range within one pipeline segment (segment-local)."
+    
+    index: int  # Chunk index within the pipeline segment
+    start_time: float  # Start in seconds (relative to the segment audio)
+    end_time: float  # End in seconds (relative to the segment audio)
+    
+    def duration(self) -> float:  # Chunk duration in seconds
+        "Chunk duration."
+```
+
+``` python
+@dataclass
+class TextSegment:
+    """
+    A text segment produced by alignment, before graph commit.
+    
+    Lean in-core mirror of the page-centric `TextSegment` (which imports FastHTML
+    card-stack types); the core carries only the alignment-relevant fields
+    (E11 precedent — keep core logic free of UI-adjacent deps).
+    """
+    
+    index: int  # Position within its pipeline segment
+    text: str  # Segment text content
+    source_id: Optional[str]  # Upstream transcription row id (job_id)
+    source_provider_id: Optional[str]  # Producing capability name
+    start_char: Optional[int]  # Start char offset into the pipeline-segment text
+    end_char: Optional[int]  # End char offset into the pipeline-segment text
+```
+
+``` python
+@dataclass
+class DecompSegment:
+    "One committed segment of the graph spine (source-coordinate timing)."
+    
+    index: int  # Global 0-based position in the document
+    text: str  # Segment text
+    start_time: float  # Start in source-audio seconds
+    end_time: float  # End in source-audio seconds
+    start_char: Optional[int]  # Char offset into the originating pipeline-segment text
+    end_char: Optional[int]  # Char offset into the originating pipeline-segment text
+    source_job_id: Optional[str]  # Upstream transcription job_id (E13: may dangle under caching)
+    source_provider_id: Optional[str]  # Upstream transcriber capability name
+    vad_chunk_index: int = 0  # Originating VAD chunk index within the pipeline segment
+    
+    def to_dict(self) -> Dict[str, Any]:  # Plain-dict form
+        "Serialize to a plain dict."
+```
+
+``` python
+@dataclass
+class DecompConfig:
+    "Configuration for one transcript-decomposition run."
+    
+    vad_plugin: str = 'cjm-media-plugin-silero-vad'  # VAD capability id
+    fa_plugin: str = 'cjm-transcription-plugin-qwen3-forced-aligner'  # Forced-alignment capability id
+    graph_plugin: str = 'cjm-graph-plugin-sqlite'  # Graph-storage capability id
+    language: str = 'English'  # Forced-alignment language
+    media_type: str = 'audio'  # Document media type
+    force: bool = False  # Bypass capability-side caches (VAD + FA)
+    assume_yes: bool = False  # Auto-accept HITL seams (headless mode)
+    
+    def to_dict(self) -> Dict[str, Any]:  # Plain-dict snapshot for the manifest
+        "Serialize to a plain dict."
+```
+
+``` python
+@dataclass
+class DecompDocument:
+    "Record of one graph Document produced from one source."
+    
+    document_id: str  # Graph Document node id
+    source_path: str  # Originating source audio path (from the upstream manifest)
+    title: str  # Document title
+    segment_count: int  # Number of Segment nodes committed
+    segment_ids: List[str] = field(...)  # Graph Segment node ids, in order
+    
+    def to_dict(self) -> Dict[str, Any]:  # Plain-dict form
+        "Serialize to a plain dict."
+```
+
+``` python
+@dataclass
+class DecompManifest:
+    "Durable record of one decomposition run (proto-bundle; see CR-20)."
+    
+    run_id: str  # Unique run identifier
+    created_at: float  # Unix timestamp at run start
+    config: Dict[str, Any]  # DecompConfig snapshot
+    source_manifest: str  # Path to the consumed transcription run manifest
+    source_format: str = ''  # Upstream manifest format tag (interchange contract)
+    source_version: str = ''  # Upstream manifest schema version
+    plugins: Dict[str, Dict[str, Any]] = field(...)  # instance_id -> identity/db_path
+    documents: List[DecompDocument] = field(...)  # Committed documents, input order
+    FORMAT: str = field(...)  # Format tag
+    VERSION: str = field(...)  # Schema version
+    
+    def to_dict(self) -> Dict[str, Any]:  # Plain-dict form for JSON serialization
+            """Serialize to a plain dict with nested documents."""
+            return {
+                "format": self.FORMAT,
+        "Serialize to a plain dict with nested documents."
+    
+    def save(
+            self,
+            path: Union[str, Path],  # Destination JSON file (parent dirs created)
+        ) -> Path:  # The written path
+        "Write the manifest as pretty-printed JSON."
+```
+
+### pipeline (`pipeline.ipynb`)
+
+> The headless decomposition pipeline: load a transcription run
+> manifest, then per source
+
+#### Import
+
+``` python
+from cjm_transcript_decomp_core.pipeline import (
+    logger,
+    field_of,
+    submit_and_wait,
+    load_source_manifest,
+    analyze_segment_vad,
+    align_segment,
+    decompose_source,
+    confirm_seam,
+    collect_plugin_info,
+    run_decomp
+)
+```
+
+#### Functions
+
+``` python
+def field_of(
+    result: Any,          # Capability result — dict over the proxy wire, object in-process
+    key: str,             # Field name to read
+    default: Any = None,  # Fallback when absent
+) -> Any:  # The field value or the default
+    """
+    Read a field from a dict-or-object capability result.
+    
+    Re-implemented here rather than shared (Nth ecosystem copy — pass-2 evidence
+    E5: results need a typed wire layer, not per-core tolerance helpers).
+    """
+```
+
+``` python
+async def submit_and_wait(
+    "Submit one capability job, wait for it, and return its result (raise on failure)."
+```
+
+``` python
+def load_source_manifest(
+    path: str,  # Path to a transcription-core run manifest JSON
+) -> Dict[str, Any]:  # Parsed manifest dict
+    """
+    Load + lightly validate a transcription-core run manifest.
+    
+    Consumed as untyped JSON — the format/version tags are the only interchange
+    contract (no shared schema type across cores; manifest-as-interchange, CR-20).
+    """
+```
+
+``` python
+async def analyze_segment_vad(
+    queue: JobQueue,
+    vad_id: str,          # VAD capability instance id
+    audio_path: str,      # Pipeline-segment audio file (model-input WAV)
+    force: bool = False,  # Bypass the VAD cache
+) -> List[VADChunk]:  # Segment-local VAD chunks, sorted, re-indexed
+    """
+    Run VAD on one pipeline-segment audio file -> segment-local VAD chunks.
+    
+    Per-segment VAD (not whole-source) is the validated decomp path; it was
+    originally chosen to avoid browser Web-Audio limits on hours-long source
+    audio in the GUI (a presentation constraint), and holds on the merits here.
+    """
+```
+
+``` python
+async def align_segment(
+    queue: JobQueue,
+    fa_id: str,           # Forced-alignment capability instance id
+    audio_path: str,      # Pipeline-segment audio file (model-input WAV)
+    text: str,            # Transcript text for this pipeline segment
+    force: bool = False,  # Bypass the FA cache
+) -> List[FAWord]:  # Word-level alignment results
+    "Run forced alignment on one (segment audio, text) pair -> FA words."
+```
+
+``` python
+async def decompose_source(
+    queue: JobQueue,
+    cfg: DecompConfig,         # Run configuration
+    source: Dict[str, Any],    # One source entry from the transcription manifest
+    manifest_path: str,        # Consumed manifest path (for provenance)
+    source_index: int,         # Position of this source within the run
+    transcriber_name: str,     # Upstream transcriber capability name
+) -> Tuple[str, List[DecompSegment]]:  # (source_path, ordered aligned segments)
+    """
+    Decompose one source's transcription segments into aligned graph segments.
+    
+    Per pipeline segment: re-run VAD on the segment audio (segment-local chunks),
+    force-align the segment text, then build one aligned segment per VAD chunk.
+    Times are offset to source coordinates; indices accumulate across the source's
+    pipeline segments.
+    """
+```
+
+``` python
+def confirm_seam(
+    seam: str,                 # Seam label, e.g. "alignment-review"
+    summary_lines: List[str],  # What the operator is being asked to accept
+    warnings: List[str],       # Tier-1 warnings (logged prominently)
+    assume_yes: bool = False,  # Headless mode: accept without prompting
+) -> bool:  # True = proceed, False = operator aborted
+    """
+    HITL approval seam in its cheapest viable form (log + optional CLI prompt).
+    
+    Per-seam HITL-assist annotation (5 fields):
+      1. signal: per-document summary + Tier-1 warnings
+      2. deterministic pre-filter: tier1_alignment_checks (no AI)
+      3. modality-bridge candidate: spectrogram / word-overlay review (future Tier 2)
+      4. authoritative verifier: re-align or re-transcribe-and-compare (future Tier 3)
+      5. flywheel capture: accept/abort decisions logged; durable capture is a
+         pass-2 seam-contract concern, not solved here
+    
+    NOTE: input() blocks the event loop — acceptable because seams sit between
+    stages with no jobs in flight; the pass-2 seam contract needs an async shape.
+    """
+```
+
+``` python
+def collect_plugin_info(
+    manager: PluginManager,   # Manager holding the loaded capabilities
+    instance_ids: List[str],  # Instance ids to record
+) -> Dict[str, Dict[str, Any]]:  # instance_id -> {name, version, db_path}
+    "Record capability identity + data-DB pointers for the run manifest (provenance)."
+```
+
+``` python
+async def run_decomp(
+    manager: PluginManager,        # Manager with VAD + FA + graph capabilities loaded
+    queue: JobQueue,               # Started job queue
+    cfg: DecompConfig,             # Run configuration
+    source_manifest_path: str,     # Transcription run manifest to decompose
+    run_id: Optional[str] = None,  # Override run id (default: generated)
+) -> DecompManifest:  # Manifest of the documents produced
+    """
+    Decompose every source in a transcription run manifest into graph documents.
+    
+    Per source: align -> [alignment-review seam] -> build payload ->
+    [commit-review seam] -> commit -> verify. An operator abort at any seam stops
+    the run; the manifest holds the documents committed so far.
+    """
+```
