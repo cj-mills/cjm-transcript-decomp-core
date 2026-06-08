@@ -31,19 +31,33 @@ graph LR
     pipeline["pipeline<br/>pipeline"]
 
     alignment --> models
-    cli --> pipeline
     cli --> models
+    cli --> pipeline
     graph_mod --> models
-    pipeline --> alignment
     pipeline --> models
     pipeline --> graph_mod
+    pipeline --> alignment
 ```
 
 *7 cross-module dependencies detected*
 
 ## CLI Reference
 
-No CLI commands found in this project.
+### `cjm-transcript-decomp-core` Command
+
+    usage: cjm-transcript-decomp-core [-h] {run} ...
+
+    Headless transcript decomposition: VAD + forced alignment -> graph spine.
+
+    positional arguments:
+      {run}
+        run       Decompose a transcription-core run manifest
+
+    options:
+      -h, --help  show this help message and exit
+
+For detailed help on any command, use
+`cjm-transcript-decomp-core <command> --help`.
 
 ## Module Overview
 
