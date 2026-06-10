@@ -15,7 +15,9 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_plugin_system.core.queue import JobQueue, JobStatus
-from cjm_graph_plugin_system.core import SourceRef, GraphContext
+from cjm_context_graph_primitives.locators import FileRef
+from cjm_context_graph_primitives.provenance import SourceRef
+from cjm_context_graph_primitives.graph import GraphContext
 from cjm_graph_domains.domains.structure import Document, Segment
 from cjm_graph_domains.domains.relations import StructureRelations
 
@@ -26,26 +28,23 @@ def build_source_ref(
     seg: DecompSegment,  # Aligned segment carrying upstream provenance
     manifest_path: str,  # Path to the consumed transcription run manifest
 ) -> Optional[SourceRef]:  # Provenance ref, or None when source info is absent
-    """Build a manifest-anchored SourceRef for one segment.
+    """Build a manifest-anchored SourceRef for one segment (CR-19 shape).
 
-    Revolution-1 provenance shape: anchor to the consumed run manifest rather
-    than the transcription DB row, because cache-hit transcriptions leave the
-    manifest job_id absent from the capability DB (E13 — manifest-vs-row dangle).
-    `plugin_name` reuses the `external:<path>` scheme (the canonical SourceRef
-    over-fit hack; direct CR-19 generalization evidence). `content_hash` verifies
-    the consumed text regardless of whether the row still exists.
+    Identity = content_hash over the consumed segment text — verifiable
+    regardless of locator resolution, so the E13/D3 dangling-row problem is now
+    fixed structurally rather than worked around. Locator = FileRef to the
+    consumed run manifest (the file this core actually reads; no more
+    `external:<path>` field abuse). slice=None: the consumed region sits inside
+    ONE MANIFEST ROW's text, which a slice framed to the manifest FILE cannot
+    honestly express (the D4 coordinate-space friction, carried until stage 5
+    gives the intra-graph GraphNodeRef(Transcript) + CharSlice anchor). The char
+    coordinates and upstream job id stay queryable as Segment node properties.
     """
     if not seg.source_job_id:
         return None
-    slice_str = None
-    if seg.start_char is not None and seg.end_char is not None:
-        slice_str = f"char:{seg.start_char}-{seg.end_char}"
     return SourceRef(
-        plugin_name=f"external:{manifest_path}",
-        table_name="transcriptions",
-        row_id=seg.source_job_id,
+        locator=FileRef(path=manifest_path),
         content_hash=SourceRef.compute_hash(seg.text.encode()),
-        segment_slice=slice_str,
     )
 
 # %% ../nbs/graph.ipynb #0af0ae04
@@ -71,6 +70,8 @@ def build_graph_payload(
             start_time=seg.start_time, end_time=seg.end_time,
             start_char=seg.start_char, end_char=seg.end_char,
         ).to_graph_node(sources=[ref] if ref else [])
+        if seg.source_job_id:
+            node.properties["source_job_id"] = seg.source_job_id
         segment_nodes.append(node)
 
     edges: List[Dict[str, Any]] = []
@@ -127,7 +128,7 @@ class VerificationResult:
     part_of_complete: bool     # PART_OF edge count == segment_count
     all_have_timing: bool      # Every segment has start_time + end_time
     all_have_sources: bool     # Every segment has >=1 SourceRef
-    source_plugins: List[str] = field(default_factory=list)  # Distinct source plugin_names
+    source_locators: List[str] = field(default_factory=list)  # Distinct source locator URIs
 
     @property
     def ok(self) -> bool:  # True when every structural check passes
@@ -170,16 +171,15 @@ async def verify_document(
     missing_timing = sum(1 for s in segs
                          if s.properties.get("start_time") is None
                          or s.properties.get("end_time") is None)
-    plugins = set()
+    locators = set()
     missing_sources = 0
     for s in segs:
         if not s.sources:
             missing_sources += 1
         for src in s.sources:
-            name = (src.get("plugin_name") if isinstance(src, dict)
-                    else getattr(src, "plugin_name", None))
-            if name:
-                plugins.add(name)
+            if isinstance(src, dict):
+                src = SourceRef.from_dict(src)
+            locators.add(src.locator.to_uri())
 
     return VerificationResult(
         document_id=document_id,
@@ -190,5 +190,5 @@ async def verify_document(
         part_of_complete=counts["PART_OF"] == n,
         all_have_timing=missing_timing == 0,
         all_have_sources=missing_sources == 0,
-        source_plugins=sorted(plugins),
+        source_locators=sorted(locators),
     )
