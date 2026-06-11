@@ -1,7 +1,10 @@
-"""The headless decomposition pipeline: load a transcription run manifest, then per source
-per pipeline-segment run VAD + forced alignment, build one aligned segment per VAD chunk
-(times offset to source coordinates), commit the spine to the graph, and verify — with
-HITL approval seams between alignment, commit, and the next source.
+"""The headless decomposition pipeline (stage 5: decomp is an EXTENDER). Load a
+transcription run manifest, verify the transcription-emitted graph root exists
+(the graph begins at transcription), then per source per pipeline-segment run
+VAD + per-transcriber forced alignment, build one aligned segment per VAD chunk
+with per-transcriber text variants, and attach the fine spine under the existing
+AudioSegment nodes via the layer's idempotent `extend_graph` — with HITL approval
+seams between alignment, commit, and the next source.
 
 Docs: https://cj-mills.github.io/cjm-transcript-decomp-corepipeline.html.md"""
 
@@ -23,14 +26,19 @@ from cjm_plugin_system.core.queue import JobQueue, JobStatus
 from cjm_plugin_system.core.ports import (
     Composition, CompositionNode, CompositionRun, NodeState, OutputRef,
 )
+from cjm_plugin_system.core.empirical_store import compute_config_hash
 
 # Typed wire-kind registration (stage 2): importing the DTO classes is what
 # lets the proxy's wire_decode hand this host process TYPED results.
 from cjm_media_plugin_system.core import MediaAnalysisResult
 from cjm_forced_alignment_adapter_interface.core import ForcedAlignResult
 
+# Stage 5: layer-owned plumbing + provenance-by-declaration.
+from cjm_context_graph_layer.ops import graph_task, extend_graph
+from cjm_context_graph_layer.declare import Derivation, derivation_to_graph
+
 from cjm_transcript_decomp_core.models import (
-    DecompConfig, DecompSegment, DecompDocument, DecompManifest,
+    DecompConfig, DecompSegment, SegmentVariant, DecompSourceRecord, DecompManifest,
     FAWord, VADChunk, new_run_id,
 )
 from cjm_transcript_decomp_core.alignment import (
@@ -38,7 +46,7 @@ from cjm_transcript_decomp_core.alignment import (
     tier1_alignment_checks,
 )
 from cjm_transcript_decomp_core.graph import (
-    build_graph_payload, commit_graph, verify_document,
+    resolve_root_ids, build_extension_payload, verify_source,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,39 +111,46 @@ def fa_words_from_result(
 
 
 def build_alignment_composition(
-    seg_list: List[Dict[str, Any]],  # Pipeline-segment entries from the transcription manifest
-    vad_id: str,          # VAD capability instance id
-    fa_id: str,           # Forced-alignment capability instance id
-    force: bool = False,  # Per-call cache-bypass control flag
+    seg_list: List[Dict[str, Any]],  # Pipeline-segment entries from the transcription manifest (0.2.0)
+    vad_id: str,               # VAD capability instance id
+    fa_id: str,                # Forced-alignment capability instance id
+    transcribers: List[str],   # Transcriber names to align (manifest `transcripts` keys, stable order)
+    force: bool = False,       # Per-call cache-bypass control flag
 ) -> Tuple[Composition, List[Dict[str, Any]]]:  # (composition, per-pseg meta rows)
-    """Build the whole-source M×(VAD ∥ FA) composition (the D8 fan-in shape).
+    """Build the whole-source M×(VAD ∥ T×FA) composition (D8 fan-in, stage-5 variants).
 
-    Each pipeline segment contributes two INDEPENDENT nodes consuming the
-    same model-input WAV — VAD and FA fan in to the host's alignment fold.
-    All inputs are host-known up-front (manifest data), so every kwarg is
-    static; the win is dispatch: the CPU-resident VAD nodes parallelize
-    under the queue's empirical admission while the GPU FA nodes serialize
-    on headroom. Empty-text segments are recorded as skipped meta rows
-    (the caller logs them) and contribute no nodes.
+    Each pipeline segment contributes one VAD node + one FA node PER TRANSCRIBER
+    with non-empty text — VAD is audio-only (run once; the shared skeleton), FA
+    maps each transcriber's text onto it. All nodes are independent; the host's
+    alignment fold fans them in. Pipeline segments where EVERY transcriber's
+    text is empty are recorded as skipped meta rows and contribute no nodes.
     """
     nodes: List[CompositionNode] = []
     metas: List[Dict[str, Any]] = []
     for i, pseg in enumerate(seg_list):
         # Manifest entries are JSON dicts (manifest-as-interchange, CR-20).
         model_input = str(pseg.get("model_input_path", ""))
-        text = str(pseg.get("text", "") or "")
         seg_start = float(pseg.get("start", 0.0))
-        job_id = pseg.get("job_id")
-        if not text.strip():
-            metas.append({"skipped": True, "seg_start": seg_start})
+        transcripts = pseg.get("transcripts") or {}
+        texts = {t: str((transcripts.get(t) or {}).get("text") or "")
+                 for t in transcribers if t in transcripts}
+        nonempty = {t: x for t, x in texts.items() if x.strip()}
+        if not nonempty:
+            metas.append({"skipped": True, "seg_start": seg_start, "pseg_index": i})
             continue
-        vad_n, fa_n = f"vad_{i:04d}", f"fa_{i:04d}"
+        vad_n = f"vad_{i:04d}"
         nodes.append(CompositionNode(vad_n, vad_id,
                                      {"media_path": model_input, "force": force}))
-        nodes.append(CompositionNode(fa_n, fa_id,
-                                     {"audio": model_input, "text": text, "force": force}))
-        metas.append({"skipped": False, "text": text, "seg_start": seg_start,
-                      "job_id": job_id, "vad_node": vad_n, "fa_node": fa_n})
+        fa_nodes: Dict[str, str] = {}
+        for ti, t in enumerate(transcribers):
+            if t not in nonempty:
+                continue
+            fa_n = f"fa_t{ti}_{i:04d}"
+            nodes.append(CompositionNode(fa_n, fa_id,
+                                         {"audio": model_input, "text": nonempty[t], "force": force}))
+            fa_nodes[t] = fa_n
+        metas.append({"skipped": False, "seg_start": seg_start, "pseg_index": i,
+                      "vad_node": vad_n, "fa_nodes": fa_nodes, "texts": nonempty})
     return Composition(nodes=nodes), metas
 
 # %% ../nbs/pipeline.ipynb #337c7f29
@@ -143,25 +158,24 @@ async def decompose_source(
     queue: JobQueue,
     cfg: DecompConfig,         # Run configuration
     source: Dict[str, Any],    # One source entry from the transcription manifest
-    manifest_path: str,        # Consumed manifest path (for provenance)
     source_index: int,         # Position of this source within the run
-    transcriber_name: str,     # Upstream transcriber capability name
+    transcribers: List[str],   # Transcriber names (manifest order)
+    text_from: str,            # Authoritative transcriber (layer-0 text)
 ) -> Tuple[str, List[DecompSegment]]:  # (source_path, ordered aligned segments)
-    """Decompose one source's transcription segments into aligned graph segments.
+    """Decompose one source into aligned fine segments with per-transcriber variants.
 
-    Stage 3 (CR-16 ports): the per-segment VAD ∥ FA invocations run as ONE
-    whole-source composition — the queue's admission parallelizes the
-    CPU-resident VAD nodes while the GPU FA nodes serialize on headroom —
-    then the pure alignment fold runs per pipeline segment over the
-    collected typed results, exactly as before (host logic stays in the
-    core). Times are offset to source coordinates; indices accumulate across
-    the source's pipeline segments.
+    The VAD-chunk skeleton is computed ONCE per pipeline segment (audio-only);
+    each transcriber's text is forced-aligned onto it independently, then the
+    pure fold merges per chunk: the `text_from` transcriber's alignment becomes
+    the authoritative text, every transcriber's chunk text + char range rides
+    `variants` (slice refs at commit). C4's "same skeleton, different text"
+    duplication is gone — agreement is stored once by construction.
     """
     source_path = str(source.get("source_path", ""))
     seg_list = list(source.get("segments") or [])
 
     comp, metas = build_alignment_composition(
-        seg_list, cfg.vad_plugin, cfg.fa_plugin, force=cfg.force)
+        seg_list, cfg.vad_plugin, cfg.fa_plugin, transcribers, force=cfg.force)
     results: Dict[str, Any] = {}
     if comp.nodes:
         comp_id = await queue.submit_composition(comp)
@@ -178,33 +192,51 @@ async def decompose_source(
     for m in metas:
         seg_start = m["seg_start"]
         if m["skipped"]:
-            logger.warning(f"[src {source_index}] empty text at {seg_start:.1f}s; "
+            logger.warning(f"[src {source_index}] no transcriber text at {seg_start:.1f}s; "
                            f"skipping pipeline segment")
             continue
-        text = m["text"]
-        job_id = m["job_id"]
         vad_chunks = vad_chunks_from_result(results[m["vad_node"]])
-        fa_words = fa_words_from_result(results[m["fa_node"]])
-        spans = map_fa_words_to_text(text, fa_words)
-        assignments = assign_words_to_chunks(fa_words, vad_chunks)
-        text_segments = build_segments_from_alignment(
-            text=text, spans=spans, assignments=assignments,
-            num_chunks=len(vad_chunks), source_id=job_id, source_provider_id=transcriber_name,
-        )
-        for w in tier1_alignment_checks(text_segments, vad_chunks):
-            logger.warning(f"[src {source_index}] pseg @ {seg_start:.1f}s: {w}")
 
-        for ts, vc in zip(text_segments, vad_chunks):
+        # Per-transcriber fold over the SHARED skeleton.
+        per_t_segments: Dict[str, List[Any]] = {}
+        for t, fa_n in m["fa_nodes"].items():
+            text = m["texts"][t]
+            fa_words = fa_words_from_result(results[fa_n])
+            spans = map_fa_words_to_text(text, fa_words)
+            assignments = assign_words_to_chunks(fa_words, vad_chunks)
+            per_t_segments[t] = build_segments_from_alignment(
+                text=text, spans=spans, assignments=assignments,
+                num_chunks=len(vad_chunks), source_provider_id=t,
+            )
+        auth = per_t_segments.get(text_from)
+        if auth is not None:
+            for w in tier1_alignment_checks(auth, vad_chunks):
+                logger.warning(f"[src {source_index}] pseg @ {seg_start:.1f}s [{text_from}]: {w}")
+        else:
+            logger.warning(f"[src {source_index}] pseg @ {seg_start:.1f}s: authoritative "
+                           f"transcriber {text_from!r} has no text here — layer-0 text empty")
+
+        for k, vc in enumerate(vad_chunks):
+            variants = []
+            for t in transcribers:
+                tsegs = per_t_segments.get(t)
+                if tsegs is None:
+                    continue
+                ts = tsegs[k]
+                if ts.text:
+                    variants.append(SegmentVariant(transcriber=t, text=ts.text,
+                                                   start_char=ts.start_char, end_char=ts.end_char))
             aligned.append(DecompSegment(
-                index=global_index, text=ts.text,
+                index=global_index,
+                text=(auth[k].text if auth is not None else ""),
                 start_time=seg_start + vc.start_time, end_time=seg_start + vc.end_time,
-                start_char=ts.start_char, end_char=ts.end_char,
-                source_job_id=job_id, source_provider_id=transcriber_name,
-                vad_chunk_index=vc.index,
+                chunk_start=vc.start_time, chunk_end=vc.end_time,
+                vad_chunk_index=vc.index, pseg_index=m["pseg_index"],
+                variants=variants,
             ))
             global_index += 1
         logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s -> "
-                    f"{len(vad_chunks)} chunks, {len(fa_words)} words")
+                    f"{len(vad_chunks)} chunks, {len(m['fa_nodes'])} transcriber alignment(s)")
     return source_path, aligned
 
 # %% ../nbs/pipeline.ipynb #61b44d8f
@@ -243,21 +275,34 @@ def confirm_seam(
 def collect_plugin_info(
     manager: PluginManager,   # Manager holding the loaded capabilities
     instance_ids: List[str],  # Instance ids to record
-) -> Dict[str, Dict[str, Any]]:  # instance_id -> {name, version, db_path}
-    """Record capability identity + data-DB pointers for the run manifest (provenance)."""
+) -> Dict[str, Dict[str, Any]]:  # instance_id -> {name, version, db_path, config_hash}
+    """Record capability identity + data-DB pointers for the run manifest (provenance).
+
+    Stage 5: also records each capability's EFFECTIVE config hash (the same
+    `compute_config_hash` the empirical store keys on) — the VAD config hash is
+    a Segment identity input. `db_path` prefers the effective config over the
+    manifest default (a --graph-db-path override must be what downstream cores
+    resolve; the D19 lesson).
+    """
     info: Dict[str, Dict[str, Any]] = {}
     for iid in instance_ids:
         meta = (getattr(manager, "plugins", {}) or {}).get(iid)
         if meta is None:
             continue
         manifest = getattr(meta, "manifest", {}) or {}
-        # Prefer the loaded instance's EFFECTIVE config (a --graph-db-path
-        # override must be what downstream cores resolve), falling back to
-        # the manifest default.
-        inst = (getattr(manager, "instances", {}) or {}).get(iid)
-        effective_db = (inst.config or {}).get("db_path") if inst is not None else None
-        info[iid] = {"name": meta.name, "version": getattr(meta, "version", None),
-                     "db_path": effective_db or manifest.get("db_path")}
+        current_config: Dict[str, Any] = {}
+        try:
+            proxy = manager.get_plugin(iid)
+            if proxy is not None:
+                current_config = proxy.get_current_config() or {}
+        except Exception as e:  # Best-effort: identity recording must not fail the run
+            logger.warning(f"collect_plugin_info: get_current_config({iid}) failed: {e}")
+        info[iid] = {
+            "name": meta.name,
+            "version": getattr(meta, "version", None),
+            "db_path": current_config.get("db_path") or manifest.get("db_path"),
+            "config_hash": compute_config_hash(current_config),
+        }
     return info
 
 # %% ../nbs/pipeline.ipynb #bd2fd10f
@@ -267,16 +312,33 @@ async def run_decomp(
     cfg: DecompConfig,             # Run configuration
     source_manifest_path: str,     # Transcription run manifest to decompose
     run_id: Optional[str] = None,  # Override run id (default: generated)
-) -> DecompManifest:  # Manifest of the documents produced
-    """Decompose every source in a transcription run manifest into graph documents.
+) -> DecompManifest:  # Manifest of the sources extended
+    """Extend every source in a transcription run manifest with its fine spine.
 
-    Per source: align -> [alignment-review seam] -> build payload ->
-    [commit-review seam] -> commit -> verify. An operator abort at any seam stops
-    the run; the manifest holds the documents committed so far.
+    Stage 5 (decomp-as-extender): the graph ROOT must already exist — decomp
+    recomputes the deterministic root ids from the manifest, verifies the
+    Source node is present (loud error pointing at transcription emission
+    otherwise), aligns per transcriber, and attaches the fine spine via the
+    layer's idempotent `extend_graph` (re-runs verify-collide). The fold is
+    declared as a `Derivation` event when segments were actually created.
     """
     run_id = run_id or new_run_id()
     src = load_source_manifest(source_manifest_path)
-    transcriber_name = (src.get("config", {}) or {}).get("transcriber_plugin", "unknown")
+    src_cfg = src.get("config", {}) or {}
+    transcribers = list(src_cfg.get("transcriber_plugins") or [])
+    if not transcribers and src_cfg.get("transcriber_plugin"):
+        # pre-0.2.0 manifest: single transcriber under the old key
+        transcribers = [str(src_cfg["transcriber_plugin"])]
+    if not transcribers:
+        raise RuntimeError("source manifest lists no transcribers")
+    text_from = cfg.text_from or (transcribers[0] if len(transcribers) == 1 else None)
+    if text_from is None:
+        raise RuntimeError(
+            f"multi-transcriber manifest ({transcribers}) requires --text-from "
+            "(the authoritative transcriber for layer-0 text)")
+    if text_from not in transcribers:
+        raise RuntimeError(f"--text-from {text_from!r} not among the manifest's transcribers {transcribers}")
+    src_plugins = src.get("plugins", {}) or {}
 
     manifest = DecompManifest(
         run_id=run_id, created_at=time.time(), config=cfg.to_dict(),
@@ -284,44 +346,68 @@ async def run_decomp(
         source_format=src.get("format", ""), source_version=src.get("version", ""),
         plugins=collect_plugin_info(manager, [cfg.vad_plugin, cfg.fa_plugin, cfg.graph_plugin]),
     )
+    vad_config_hash = str((manifest.plugins.get(cfg.vad_plugin) or {}).get("config_hash") or "")
 
     sources = src.get("sources", []) or []
     for i, source in enumerate(sources):
+        # Extender pre-check: the transcription-emitted root must exist.
+        roots = resolve_root_ids(source, src_plugins)
+        root = await graph_task(queue, cfg.graph_plugin, "get_node", node_id=roots["source"])
+        if root is None:
+            raise RuntimeError(
+                f"Source root {roots['source']} not found in the graph for "
+                f"{source.get('source_path')!r} — the graph begins at transcription: "
+                "re-run cjm-transcription-core with --graph-plugin against this DB first")
+
         source_path, aligned = await decompose_source(
-            queue, cfg, source, str(source_manifest_path), i, transcriber_name)
-        title = Path(source_path).stem or f"document-{i}"
+            queue, cfg, source, i, transcribers, text_from)
+        title = Path(source_path).stem or f"source-{i}"
 
         empty = sum(1 for a in aligned if not a.text.strip())
-        warns = [f"{empty}/{len(aligned)} aligned segment(s) have empty text"] if empty else []
+        warns = [f"{empty}/{len(aligned)} aligned segment(s) have empty layer-0 text"] if empty else []
         if not confirm_seam("alignment-review",
-                            [f"{title}: {len(aligned)} aligned segment(s)"],
+                            [f"{title}: {len(aligned)} aligned segment(s), text_from={text_from}"],
                             warns, assume_yes=cfg.assume_yes):
             logger.warning(f"run {run_id}: aborted at source {i} ({source_path})")
             break
 
-        nodes, edges, doc_id, seg_ids = build_graph_payload(
-            title, aligned, str(source_manifest_path), media_type=cfg.media_type)
+        nodes, edges, ids = build_extension_payload(
+            source, src_plugins, vad_config_hash, text_from, aligned)
 
         if not confirm_seam("commit-review",
-                            [f"{title}: committing {len(seg_ids)} segment node(s) + "
-                             f"{len(edges)} edge(s) to {cfg.graph_plugin}"],
+                            [f"{title}: extending Source {ids['source'][:8]}… with "
+                             f"{len(ids['segments'])} segment node(s) + {len(edges)} edge(s) "
+                             f"via {cfg.graph_plugin}"],
                             [], assume_yes=cfg.assume_yes):
             logger.warning(f"run {run_id}: commit declined at source {i} ({source_path})")
             break
 
-        counts = await commit_graph(queue, cfg.graph_plugin, nodes, edges)
-        logger.info(f"[src {i}] committed {counts['nodes']} node(s), {counts['edges']} edge(s)")
+        res = await extend_graph(queue, cfg.graph_plugin, nodes, edges)
+        logger.info(f"[src {i}] extension: +{res.nodes_added} node(s) "
+                    f"({res.nodes_verified} verified present), +{res.edges_added} edge(s) "
+                    f"({res.edges_existing} existing)")
+        if res.nodes_added:
+            d = Derivation(
+                actor="host:cjm-transcript-decomp-core", method="alignment-fold/v1",
+                input_ids=ids["transcripts_used"], output_ids=[ids["source"]],
+                properties={"run_id": run_id, "segments": len(ids["segments"]),
+                            "text_from": text_from},
+            )
+            dn, de = derivation_to_graph(d)
+            await extend_graph(queue, cfg.graph_plugin, [dn], de)
 
-        vr = await verify_document(queue, cfg.graph_plugin, doc_id)
+        vr = await verify_source(queue, cfg.graph_plugin, ids["source"])
         if vr is None:
-            logger.error(f"[src {i}] verify: document {doc_id} NOT FOUND in graph")
+            logger.error(f"[src {i}] verify: Source {ids['source']} NOT FOUND in graph")
         else:
             logger.info(f"[src {i}] verify: {'OK' if vr.ok else 'FAILED'} "
-                        f"(segments={vr.segment_count}, starts_with={vr.has_starts_with}, "
-                        f"next_chain={vr.next_chain_complete}, part_of={vr.part_of_complete}, "
+                        f"(asegs={vr.audio_segment_count}, segments={vr.segment_count}, "
+                        f"src_starts={vr.source_starts_with}, aseg_next={vr.aseg_next_complete}, "
+                        f"seg_next={vr.seg_next_complete}, part_of={vr.part_of_complete}, "
+                        f"aseg_starts={vr.aseg_starts_with_complete}, "
                         f"timing={vr.all_have_timing}, sources={vr.all_have_sources})")
 
-        manifest.documents.append(DecompDocument(
-            document_id=doc_id, source_path=source_path, title=title,
-            segment_count=len(seg_ids), segment_ids=seg_ids))
+        manifest.sources.append(DecompSourceRecord(
+            source_node_id=ids["source"], source_path=source_path, title=title,
+            segment_count=len(ids["segments"]), segment_ids=ids["segments"]))
     return manifest

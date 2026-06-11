@@ -27,11 +27,11 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     """Build the CLI parser (subcommands: run)."""
     parser = argparse.ArgumentParser(
         prog="cjm-transcript-decomp-core",
-        description="Headless transcript decomposition: VAD + forced alignment -> graph spine.",
+        description="Headless transcript decomposition: VAD + forced alignment -> fine-spine graph extension.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="Decompose a transcription-core run manifest")
+    run = sub.add_parser("run", help="Extend a transcription-emitted graph root with the fine spine")
     run.add_argument("manifest", help="Transcription-core run manifest JSON (the source to decompose)")
     run.add_argument("--manifests-dir", default=".cjm/manifests", help="Capability manifests directory")
     run.add_argument("--vad-plugin", default="cjm-media-plugin-silero-vad", help="VAD capability name")
@@ -39,6 +39,10 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     run.add_argument("--graph-plugin", default="cjm-graph-plugin-sqlite", help="Graph-storage capability name")
     run.add_argument("--graph-db-path", default=None,
                      help="Explicit graph DB path override (F10; scratch-graph loop-backs; default: the capability's configured db_path)")
+    run.add_argument("--text-from", default=None,
+                     help="Authoritative transcriber for layer-0 text (the ACCURACY model; "
+                          "required when the manifest carries multiple transcribers; "
+                          "default: the manifest's sole transcriber)")
     run.add_argument("--sysmon-plugin", default=None, help="MonitorPlugin capability for GPU subtree attribution (CR-7); loaded first; default: no monitor")
     run.add_argument("--language", default="English", help="Forced-alignment language")
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
@@ -70,8 +74,8 @@ def load_capabilities(
 # %% ../nbs/cli.ipynb #c6fda10a
 async def run_command(
     args: argparse.Namespace,  # Parsed CLI arguments for the `run` subcommand
-) -> int:  # Process exit code (0 = all sources decomposed + committed)
-    """Execute the `run` subcommand: decompose a transcription manifest into a graph spine."""
+) -> int:  # Process exit code (0 = all sources extended + verified)
+    """Execute the `run` subcommand: extend a transcription-emitted root with the fine spine."""
     manifest_path = str(Path(args.manifest).resolve())
     if not Path(manifest_path).exists():
         raise SystemExit(f"source manifest not found: {manifest_path}")
@@ -80,6 +84,7 @@ async def run_command(
         vad_plugin=args.vad_plugin,
         fa_plugin=args.fa_plugin,
         graph_plugin=args.graph_plugin,
+        text_from=args.text_from,
         language=args.language,
         force=args.force,
         assume_yes=args.yes,
@@ -114,12 +119,12 @@ async def run_command(
 
     out = Path(args.output) if args.output else Path("runs") / f"{manifest.run_id}.json"
     manifest.save(out)
-    n_sources = len(load_source_manifest(manifest_path).get("sources", []) or [])
-    n_docs = len(manifest.documents)
-    n_segs = sum(d.segment_count for d in manifest.documents)
+    n_manifest_sources = len(load_source_manifest(manifest_path).get("sources", []) or [])
+    n_sources = len(manifest.sources)
+    n_segs = sum(s.segment_count for s in manifest.sources)
     print(f"decomp manifest: {out}")
-    print(f"documents committed: {n_docs}/{n_sources}  segment nodes: {n_segs}")
-    return 0 if n_docs == n_sources else 1
+    print(f"sources extended: {n_sources}/{n_manifest_sources}  segment nodes: {n_segs}")
+    return 0 if n_sources == n_manifest_sources else 1
 
 # %% ../nbs/cli.ipynb #fe7332f2
 def main(
