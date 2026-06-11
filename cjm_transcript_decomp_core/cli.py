@@ -12,7 +12,7 @@ import argparse
 import asyncio
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from cjm_plugin_system.core.manager import PluginManager
 from cjm_plugin_system.core.queue import JobQueue
@@ -37,6 +37,8 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     run.add_argument("--vad-plugin", default="cjm-media-plugin-silero-vad", help="VAD capability name")
     run.add_argument("--fa-plugin", default="cjm-transcription-plugin-qwen3-forced-aligner", help="Forced-alignment capability name")
     run.add_argument("--graph-plugin", default="cjm-graph-plugin-sqlite", help="Graph-storage capability name")
+    run.add_argument("--graph-db-path", default=None,
+                     help="Explicit graph DB path override (F10; scratch-graph loop-backs; default: the capability's configured db_path)")
     run.add_argument("--sysmon-plugin", default=None, help="MonitorPlugin capability for GPU subtree attribution (CR-7); loaded first; default: no monitor")
     run.add_argument("--language", default="English", help="Forced-alignment language")
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
@@ -49,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
 def load_capabilities(
     manager: PluginManager,   # Freshly constructed manager
     instance_ids: List[str],  # Capability names to load (default instances), in order
+    configs: Optional[Dict[str, Dict[str, Any]]] = None,  # Per-capability config overrides (caller-wins, C8)
 ) -> None:
     """Discover manifests + load each requested capability (default instance)."""
     manager.discover_manifests()
@@ -60,7 +63,7 @@ def load_capabilities(
                 f"capability {iid!r} not found in manifests "
                 f"(discovered: {sorted(discovered)}) — run cjm-ctl install-all first"
             )
-        if not manager.load_plugin(meta):
+        if not manager.load_plugin(meta, config=(configs or {}).get(iid)):
             raise SystemExit(f"failed to load capability {iid!r}")
         logger.info(f"loaded {iid}")
 
@@ -91,7 +94,11 @@ async def run_command(
     )
     instance_ids = [cfg.vad_plugin, cfg.fa_plugin, cfg.graph_plugin]
     load_order = ([args.sysmon_plugin] if args.sysmon_plugin else []) + instance_ids
-    load_capabilities(manager, load_order)
+    # F10: --graph-db-path threads a caller-wins config into the graph load
+    # (the C8 pattern correction-core already used; scratch-graph loop-backs).
+    configs = ({cfg.graph_plugin: {"db_path": args.graph_db_path}}
+               if args.graph_db_path else None)
+    load_capabilities(manager, load_order, configs=configs)
 
     queue = JobQueue(deps=manager, sysmon_plugin_name=args.sysmon_plugin)
     await queue.start()

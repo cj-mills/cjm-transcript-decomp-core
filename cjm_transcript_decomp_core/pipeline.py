@@ -251,8 +251,13 @@ def collect_plugin_info(
         if meta is None:
             continue
         manifest = getattr(meta, "manifest", {}) or {}
+        # Prefer the loaded instance's EFFECTIVE config (a --graph-db-path
+        # override must be what downstream cores resolve), falling back to
+        # the manifest default.
+        inst = (getattr(manager, "instances", {}) or {}).get(iid)
+        effective_db = (inst.config or {}).get("db_path") if inst is not None else None
         info[iid] = {"name": meta.name, "version": getattr(meta, "version", None),
-                     "db_path": manifest.get("db_path")}
+                     "db_path": effective_db or manifest.get("db_path")}
     return info
 
 # %% ../nbs/pipeline.ipynb #bd2fd10f
