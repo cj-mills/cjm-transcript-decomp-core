@@ -282,7 +282,8 @@ def collect_plugin_info(
     `compute_config_hash` the empirical store keys on) — the VAD config hash is
     a Segment identity input. `db_path` prefers the effective config over the
     manifest default (a --graph-db-path override must be what downstream cores
-    resolve; the D19 lesson).
+    resolve; the D19 lesson). Stage 6 (0.2.1): the EFFECTIVE config dict is
+    recorded READABLY beside its hash (the I8 lesson).
     """
     info: Dict[str, Dict[str, Any]] = {}
     for iid in instance_ids:
@@ -302,6 +303,7 @@ def collect_plugin_info(
             "version": getattr(meta, "version", None),
             "db_path": current_config.get("db_path") or manifest.get("db_path"),
             "config_hash": compute_config_hash(current_config),
+            "config": current_config,
         }
     return info
 

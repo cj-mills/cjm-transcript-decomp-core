@@ -164,7 +164,7 @@ class DecompManifest:
     sources: List[DecompSourceRecord] = field(default_factory=list)   # Extended sources, input order
 
     FORMAT: str = field(default="cjm-transcript-decomp-core/run-manifest", repr=False)  # Format tag
-    VERSION: str = field(default="0.2.0", repr=False)                                   # Schema version
+    VERSION: str = field(default="0.2.1", repr=False)                                   # Schema version
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form for JSON serialization
         """Serialize to a plain dict with nested sources."""
