@@ -18,6 +18,7 @@ __all__ = ['logger', 'submit_and_wait', 'load_source_manifest', 'vad_chunks_from
 import json
 import logging
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +28,7 @@ from cjm_plugin_system.core.ports import (
     Composition, CompositionNode, CompositionRun, NodeState, OutputRef,
 )
 from cjm_plugin_system.core.empirical_store import compute_config_hash
+from cjm_plugin_system.core.journal_store import JournalEvent, SubstrateEventType
 
 # Typed wire-kind registration (stage 2): importing the DTO classes is what
 # lets the proxy's wire_decode hand this host process TYPED results.
@@ -307,6 +309,27 @@ def collect_plugin_info(
         }
     return info
 
+# %% ../nbs/pipeline.ipynb #820f2b75
+def _journal_run_event(
+    manager: PluginManager,  # Manager owning the journal store
+    event_type: str,         # SubstrateEventType value (run_started / run_finished / verify_outcome)
+    run_id: str,             # This run's manifest id
+    actor: Optional[str],    # Who/what initiated the run
+    payload: Dict[str, Any], # Run-level structured detail
+) -> None:
+    """Append a host-tier run event to the journal (CR-14 follow-up).
+
+    The cores are the trusted host writer class: RUN_STARTED/RUN_FINISHED
+    bracket the run (run manifest <-> journal linkage by run_id) and
+    VERIFY_OUTCOME makes skeptical-lens results durable rows (I14). No-op
+    when the manager has no journal store; append failures stay LOUD.
+    """
+    journal = getattr(manager, "journal_store", None)
+    if journal is None:
+        return
+    journal.append(JournalEvent(
+        event_type=event_type, run_id=run_id, actor=actor, payload=payload))
+
 # %% ../nbs/pipeline.ipynb #bd2fd10f
 async def run_decomp(
     manager: PluginManager,        # Manager with VAD + FA + graph capabilities loaded
@@ -314,6 +337,7 @@ async def run_decomp(
     cfg: DecompConfig,             # Run configuration
     source_manifest_path: str,     # Transcription run manifest to decompose
     run_id: Optional[str] = None,  # Override run id (default: generated)
+    actor: Optional[str] = None,   # Who/what initiated (journal attribution; CLI default cli:<user>)
 ) -> DecompManifest:  # Manifest of the sources extended
     """Extend every source in a transcription run manifest with its fine spine.
 
@@ -325,6 +349,16 @@ async def run_decomp(
     declared as a `Derivation` event when segments were actually created.
     """
     run_id = run_id or new_run_id()
+    # CR-14 follow-up: queue-scoped run context — every job submitted in this
+    # run carries run_id/actor into its journal rows + worker diagnostics
+    # (run-manifest <-> journal linkage); the run itself is bracketed by
+    # RUN_STARTED/RUN_FINISHED host-tier rows.
+    queue.set_run_context(run_id=run_id, actor=actor)
+    _journal_run_event(manager, SubstrateEventType.RUN_STARTED.value, run_id, actor, {
+        "core": "cjm-transcript-decomp-core",
+        "source_manifest": str(source_manifest_path),
+        "graph_plugin": cfg.graph_plugin,
+    })
     src = load_source_manifest(source_manifest_path)
     src_cfg = src.get("config", {}) or {}
     transcribers = list(src_cfg.get("transcriber_plugins") or [])
@@ -351,65 +385,92 @@ async def run_decomp(
     vad_config_hash = str((manifest.plugins.get(cfg.vad_plugin) or {}).get("config_hash") or "")
 
     sources = src.get("sources", []) or []
-    for i, source in enumerate(sources):
-        # Extender pre-check: the transcription-emitted root must exist.
-        roots = resolve_root_ids(source, src_plugins)
-        root = await graph_task(queue, cfg.graph_plugin, "get_node", node_id=roots["source"])
-        if root is None:
-            raise RuntimeError(
-                f"Source root {roots['source']} not found in the graph for "
-                f"{source.get('source_path')!r} — the graph begins at transcription: "
-                "re-run cjm-transcription-core with --graph-plugin against this DB first")
+    status = "completed"
+    try:
+        for i, source in enumerate(sources):
+            # Extender pre-check: the transcription-emitted root must exist.
+            roots = resolve_root_ids(source, src_plugins)
+            root = await graph_task(queue, cfg.graph_plugin, "get_node", node_id=roots["source"])
+            if root is None:
+                raise RuntimeError(
+                    f"Source root {roots['source']} not found in the graph for "
+                    f"{source.get('source_path')!r} — the graph begins at transcription: "
+                    "re-run cjm-transcription-core with --graph-plugin against this DB first")
 
-        source_path, aligned = await decompose_source(
-            queue, cfg, source, i, transcribers, text_from)
-        title = Path(source_path).stem or f"source-{i}"
+            source_path, aligned = await decompose_source(
+                queue, cfg, source, i, transcribers, text_from)
+            title = Path(source_path).stem or f"source-{i}"
 
-        empty = sum(1 for a in aligned if not a.text.strip())
-        warns = [f"{empty}/{len(aligned)} aligned segment(s) have empty layer-0 text"] if empty else []
-        if not confirm_seam("alignment-review",
-                            [f"{title}: {len(aligned)} aligned segment(s), text_from={text_from}"],
-                            warns, assume_yes=cfg.assume_yes):
-            logger.warning(f"run {run_id}: aborted at source {i} ({source_path})")
-            break
+            empty = sum(1 for a in aligned if not a.text.strip())
+            warns = [f"{empty}/{len(aligned)} aligned segment(s) have empty layer-0 text"] if empty else []
+            if not confirm_seam("alignment-review",
+                                [f"{title}: {len(aligned)} aligned segment(s), text_from={text_from}"],
+                                warns, assume_yes=cfg.assume_yes):
+                logger.warning(f"run {run_id}: aborted at source {i} ({source_path})")
+                status = "aborted"
+                break
 
-        nodes, edges, ids = build_extension_payload(
-            source, src_plugins, vad_config_hash, text_from, aligned)
+            nodes, edges, ids = build_extension_payload(
+                source, src_plugins, vad_config_hash, text_from, aligned)
 
-        if not confirm_seam("commit-review",
-                            [f"{title}: extending Source {ids['source'][:8]}… with "
-                             f"{len(ids['segments'])} segment node(s) + {len(edges)} edge(s) "
-                             f"via {cfg.graph_plugin}"],
-                            [], assume_yes=cfg.assume_yes):
-            logger.warning(f"run {run_id}: commit declined at source {i} ({source_path})")
-            break
+            if not confirm_seam("commit-review",
+                                [f"{title}: extending Source {ids['source'][:8]}… with "
+                                 f"{len(ids['segments'])} segment node(s) + {len(edges)} edge(s) "
+                                 f"via {cfg.graph_plugin}"],
+                                [], assume_yes=cfg.assume_yes):
+                logger.warning(f"run {run_id}: commit declined at source {i} ({source_path})")
+                status = "aborted"
+                break
 
-        res = await extend_graph(queue, cfg.graph_plugin, nodes, edges)
-        logger.info(f"[src {i}] extension: +{res.nodes_added} node(s) "
-                    f"({res.nodes_verified} verified present), +{res.edges_added} edge(s) "
-                    f"({res.edges_existing} existing)")
-        if res.nodes_added:
-            d = Derivation(
-                actor="host:cjm-transcript-decomp-core", method="alignment-fold/v1",
-                input_ids=ids["transcripts_used"], output_ids=[ids["source"]],
-                properties={"run_id": run_id, "segments": len(ids["segments"]),
-                            "text_from": text_from},
-            )
-            dn, de = derivation_to_graph(d)
-            await extend_graph(queue, cfg.graph_plugin, [dn], de)
+            res = await extend_graph(queue, cfg.graph_plugin, nodes, edges)
+            logger.info(f"[src {i}] extension: +{res.nodes_added} node(s) "
+                        f"({res.nodes_verified} verified present), +{res.edges_added} edge(s) "
+                        f"({res.edges_existing} existing)")
+            if res.nodes_added:
+                d = Derivation(
+                    actor="host:cjm-transcript-decomp-core", method="alignment-fold/v1",
+                    input_ids=ids["transcripts_used"], output_ids=[ids["source"]],
+                    properties={"run_id": run_id, "segments": len(ids["segments"]),
+                                "text_from": text_from},
+                )
+                dn, de = derivation_to_graph(d)
+                await extend_graph(queue, cfg.graph_plugin, [dn], de)
 
-        vr = await verify_source(queue, cfg.graph_plugin, ids["source"])
-        if vr is None:
-            logger.error(f"[src {i}] verify: Source {ids['source']} NOT FOUND in graph")
-        else:
-            logger.info(f"[src {i}] verify: {'OK' if vr.ok else 'FAILED'} "
-                        f"(asegs={vr.audio_segment_count}, segments={vr.segment_count}, "
-                        f"src_starts={vr.source_starts_with}, aseg_next={vr.aseg_next_complete}, "
-                        f"seg_next={vr.seg_next_complete}, part_of={vr.part_of_complete}, "
-                        f"aseg_starts={vr.aseg_starts_with_complete}, "
-                        f"timing={vr.all_have_timing}, sources={vr.all_have_sources})")
+            vr = await verify_source(queue, cfg.graph_plugin, ids["source"])
+            if vr is None:
+                logger.error(f"[src {i}] verify: Source {ids['source']} NOT FOUND in graph")
+            else:
+                logger.info(f"[src {i}] verify: {'OK' if vr.ok else 'FAILED'} "
+                            f"(asegs={vr.audio_segment_count}, segments={vr.segment_count}, "
+                            f"src_starts={vr.source_starts_with}, aseg_next={vr.aseg_next_complete}, "
+                            f"seg_next={vr.seg_next_complete}, part_of={vr.part_of_complete}, "
+                            f"aseg_starts={vr.aseg_starts_with_complete}, "
+                            f"timing={vr.all_have_timing}, sources={vr.all_have_sources})")
 
-        manifest.sources.append(DecompSourceRecord(
-            source_node_id=ids["source"], source_path=source_path, title=title,
-            segment_count=len(ids["segments"]), segment_ids=ids["segments"]))
+            # I14: verify outcomes are journal ROWS (absence of a log line is not
+            # green); the full check vector rides the payload.
+            _journal_run_event(manager, SubstrateEventType.VERIFY_OUTCOME.value, run_id, actor, {
+                "core": "cjm-transcript-decomp-core",
+                "source_node_id": ids["source"],
+                "found": vr is not None,
+                "ok": (vr.ok if vr is not None else False),
+                "checks": (asdict(vr) if vr is not None else None),
+            })
+
+            manifest.sources.append(DecompSourceRecord(
+                source_node_id=ids["source"], source_path=source_path, title=title,
+                segment_count=len(ids["segments"]), segment_ids=ids["segments"]))
+    except BaseException as e:
+        # The journal exists for exactly this row: a run that DIED records
+        # how far it got (failures stop being the unattributed case).
+        _journal_run_event(manager, SubstrateEventType.RUN_FINISHED.value, run_id, actor, {
+            "core": "cjm-transcript-decomp-core", "status": "failed", "error": repr(e),
+            "sources_completed": len(manifest.sources), "sources_total": len(sources),
+        })
+        raise
+    _journal_run_event(manager, SubstrateEventType.RUN_FINISHED.value, run_id, actor, {
+        "core": "cjm-transcript-decomp-core", "status": status,
+        "sources_completed": len(manifest.sources), "sources_total": len(sources),
+        "segments": sum(s.segment_count for s in manifest.sources),
+    })
     return manifest
