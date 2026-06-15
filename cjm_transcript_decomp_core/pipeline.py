@@ -32,7 +32,7 @@ from cjm_plugin_system.core.journal_store import JournalEvent, SubstrateEventTyp
 
 # Typed wire-kind registration (stage 2): importing the DTO classes is what
 # lets the proxy's wire_decode hand this host process TYPED results.
-from cjm_media_plugin_system.core import MediaAnalysisResult
+from cjm_capability_primitives.vad import VADResult
 from cjm_forced_alignment_adapter_interface.core import ForcedAlignResult
 
 # Stage 5: layer-owned plumbing + provenance-by-declaration.
@@ -85,7 +85,7 @@ def load_source_manifest(
 
 # %% ../nbs/pipeline.ipynb #56dce0d8
 def vad_chunks_from_result(
-    result: MediaAnalysisResult,  # Typed VAD result (wire-decoded at the proxy)
+    result: VADResult,  # Typed VAD result (wire-decoded at the proxy)
 ) -> List[VADChunk]:  # Segment-local VAD chunks, sorted, re-indexed
     """Normalize a typed VAD result into segment-local VAD chunks.
 
@@ -141,8 +141,13 @@ def build_alignment_composition(
             metas.append({"skipped": True, "seg_start": seg_start, "pseg_index": i})
             continue
         vad_n = f"vad_{i:04d}"
+        # Stage 8 (Option C): VAD via the task channel (vad/detect_speech); the
+        # adapter owns the cache + force. model_input is already model-ready
+        # (16k mono, converted upstream by transcription-core), so no convert here.
         nodes.append(CompositionNode(vad_n, vad_id,
-                                     {"media_path": model_input, "force": force}))
+                                     {"audio": model_input},
+                                     task_name="vad", method="detect_speech",
+                                     control={"force": force}))
         fa_nodes: Dict[str, str] = {}
         for ti, t in enumerate(transcribers):
             if t not in nonempty:
