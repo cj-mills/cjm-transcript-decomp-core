@@ -59,10 +59,16 @@ plugins:
     # The Plugin Package (local source)
     package: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-transcription-plugin-qwen3-forced-aligner/"
 
-    # Interface Libraries
+    # Interface Libraries (schema v2: substrate AUTO-INJECTED; the tool depends
+    # only on the result data noun, not the old forced-alignment domain interface lib)
     interface_libs:
-      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-plugin-system/"
-      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-transcription-plugin-system/"
+      - "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-capability-primitives/"
+
+    # Adapter impls this worker env carries (the generic FA adapter; auto-binds
+    # to qwen3-forced-aligner via surface match: align + get_current_config)
+    adapters:
+      - lib: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-forced-alignment-adapter-interface/"
+        impl: "cjm_forced_alignment_adapter_interface.generic:GenericForcedAlignmentAdapter"
 
   # ----------------------------------------------------------------
   # Context Graph: SQLite Graph

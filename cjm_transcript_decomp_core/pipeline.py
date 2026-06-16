@@ -31,9 +31,11 @@ from cjm_plugin_system.core.empirical_store import compute_config_hash
 from cjm_plugin_system.core.journal_store import JournalEvent, SubstrateEventType
 
 # Typed wire-kind registration (stage 2): importing the DTO classes is what
-# lets the proxy's wire_decode hand this host process TYPED results.
+# lets the proxy's wire_decode hand this host process TYPED results. Both result
+# nouns live in cjm-capability-primitives (Option C / PILLAR 1c — the tool/host
+# depend on the data noun, never the adapter machinery).
 from cjm_capability_primitives.vad import VADResult
-from cjm_forced_alignment_adapter_interface.core import ForcedAlignResult
+from cjm_capability_primitives.forced_alignment import ForcedAlignResult
 
 # Stage 5: layer-owned plumbing + provenance-by-declaration.
 from cjm_context_graph_layer.ops import graph_task, extend_graph
@@ -126,6 +128,10 @@ def build_alignment_composition(
     maps each transcriber's text onto it. All nodes are independent; the host's
     alignment fold fans them in. Pipeline segments where EVERY transcriber's
     text is empty are recorded as skipped meta rows and contribute no nodes.
+
+    Stage 8 (Option C): every node rides the TASK CHANNEL now — VAD on
+    vad/detect_speech, FA on forced_alignment/align — and per-call `force` rides
+    `control` (the adapters own caching). The native-routed path is gone.
     """
     nodes: List[CompositionNode] = []
     metas: List[Dict[str, Any]] = []
@@ -141,9 +147,9 @@ def build_alignment_composition(
             metas.append({"skipped": True, "seg_start": seg_start, "pseg_index": i})
             continue
         vad_n = f"vad_{i:04d}"
-        # Stage 8 (Option C): VAD via the task channel (vad/detect_speech); the
-        # adapter owns the cache + force. model_input is already model-ready
-        # (16k mono, converted upstream by transcription-core), so no convert here.
+        # VAD via the task channel (vad/detect_speech); the adapter owns the cache
+        # + force. model_input is already model-ready (16k mono, converted upstream
+        # by transcription-core), so no convert here.
         nodes.append(CompositionNode(vad_n, vad_id,
                                      {"audio": model_input},
                                      task_name="vad", method="detect_speech",
@@ -153,8 +159,13 @@ def build_alignment_composition(
             if t not in nonempty:
                 continue
             fa_n = f"fa_t{ti}_{i:04d}"
+            # FA via the task channel (forced_alignment/align); the adapter owns
+            # the cache + force. text is the per-transcriber transcript aligned
+            # against the (model-ready) audio.
             nodes.append(CompositionNode(fa_n, fa_id,
-                                         {"audio": model_input, "text": nonempty[t], "force": force}))
+                                         {"audio": model_input, "text": nonempty[t]},
+                                         task_name="forced_alignment", method="align",
+                                         control={"force": force}))
             fa_nodes[t] = fa_n
         metas.append({"skipped": False, "seg_start": seg_start, "pseg_index": i,
                       "vad_node": vad_n, "fa_nodes": fa_nodes, "texts": nonempty})
