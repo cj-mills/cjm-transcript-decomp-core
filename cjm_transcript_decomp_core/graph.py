@@ -36,41 +36,47 @@ from cjm_context_graph_layer.ops import GRAPH_TASK, graph_task, extend_graph
 from cjm_context_graph_layer.grammar import SpineRelations, grouped_spine_edges
 from cjm_transcript_graph_schema.schema import (
     TranscriptGraphLabels, SegmentNode, TranscriptSliceRef,
-    source_node_id, audio_segment_node_id, transcript_node_id,
+    source_node_id, audio_segment_node_id, audio_rendition_node_id, transcript_node_id,
 )
 
 from .models import DecompSegment
 
 # %% ../nbs/graph.ipynb #e22f040d
 def resolve_root_ids(
-    source_entry: Dict[str, Any],            # One source entry from the transcription manifest (0.2.0)
+    source_entry: Dict[str, Any],            # One source entry from the transcription manifest (0.3.0)
     plugins_info: Dict[str, Dict[str, Any]], # The transcription manifest's plugins block (config hashes)
-) -> Dict[str, Any]:  # {"source": id, "audio_segments": [{id, start, end, model_input_hash, transcripts}]}
+) -> Dict[str, Any]:  # {"source", "chain", "audio_segments": [{audio_segment, rendition, start, end, model_input_hash, transcripts}]}
     """Recompute the transcription-emitted root node ids from manifest data.
 
     Deterministic identity makes the extender lookup a RECOMPUTATION, not a
     search: Source = content hash; AudioSegment = (source, boundary range);
-    Transcript = (audio segment, transcriber, config_hash) — all carried by the
-    0.2.0 manifest. No stored-id coupling between the cores.
+    AudioRendition = (audio segment, preprocessing chain) — the per-source
+    `chain` ([] = raw convert-only) carried by the 0.3.0 manifest; Transcript =
+    (rendition, transcriber, config_hash). No stored-id coupling between the
+    cores. A pre-0.3.0 manifest (no `chain`) recomputes the raw rendition ids
+    (empty chain), which is correct for any non-preprocessed run.
     """
     content_hash = str(source_entry.get("content_hash") or "")
     if not content_hash:
         raise ValueError(
             f"source {source_entry.get('source_path')!r} has no content_hash — "
-            "re-run transcription on the 0.2.0 manifest schema")
+            "re-run transcription on the 0.3.0 manifest schema")
     source_id = source_node_id(content_hash)
+    chain = list(source_entry.get("chain") or [])  # [] = raw convert-only rendition
     asegs: List[Dict[str, Any]] = []
     for pseg in source_entry.get("segments") or []:
         start, end = float(pseg.get("start", 0.0)), float(pseg.get("end", 0.0))
         aseg_id = audio_segment_node_id(source_id, start, end)
+        rendition_id = audio_rendition_node_id(aseg_id, chain)
         transcripts = {
-            t: transcript_node_id(aseg_id, t, str((plugins_info.get(t) or {}).get("config_hash") or ""))
+            t: transcript_node_id(rendition_id, t, str((plugins_info.get(t) or {}).get("config_hash") or ""))
             for t in (pseg.get("transcripts") or {})
         }
-        asegs.append({"id": aseg_id, "start": start, "end": end,
+        asegs.append({"audio_segment": aseg_id, "rendition": rendition_id,
+                      "start": start, "end": end,
                       "model_input_hash": str(pseg.get("model_input_hash") or ""),
                       "transcripts": transcripts})
-    return {"source": source_id, "audio_segments": asegs}
+    return {"source": source_id, "chain": chain, "audio_segments": asegs}
 
 # %% ../nbs/graph.ipynb #0af0ae04
 def build_extension_payload(
@@ -82,13 +88,14 @@ def build_extension_payload(
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:  # (nodes, edges, ids)
     """Build the fine-spine EXTENSION payload (pure; no capability calls).
 
-    Segment identity is audio-side (audio segment, VAD config, chunk range) —
-    shared across transcribers by construction. Each Segment carries the audio
-    `TimeSlice` ref + one `CharSlice` ref per transcriber variant; `text_from`
-    is recorded per segment as provenance (which Transcript the layer-0 text
-    came from), never as global config. Edges come from `grouped_spine_edges`:
-    PART_OF to the OWNING AudioSegment, STARTS_WITH per AudioSegment, NEXT
-    chained source-wide across coarse boundaries.
+    Segment identity is audio-side (audio RENDITION, VAD config, chunk range) —
+    shared across transcribers by construction, distinct per rendition (vocals
+    isolation can yield different VAD chunking than raw). Each Segment carries
+    the audio `TimeSlice` ref into its rendition + one `CharSlice` ref per
+    transcriber variant; `text_from` is recorded per segment as provenance
+    (which Transcript the layer-0 text came from), never as global config. Edges
+    come from `grouped_spine_edges`: PART_OF to the OWNING AudioRendition,
+    STARTS_WITH per rendition, NEXT chained source-wide across coarse boundaries.
     """
     roots = resolve_root_ids(source_entry, plugins_info)
     source_id = roots["source"]
@@ -109,7 +116,7 @@ def build_extension_payload(
                                              end_char=var.end_char, text=var.text))
             used_transcripts.add(tid)
         node = SegmentNode(
-            audio_segment=a["id"], vad_config_hash=vad_config_hash,
+            rendition=a["rendition"], vad_config_hash=vad_config_hash,
             chunk_start=seg.chunk_start, chunk_end=seg.chunk_end,
             index=seg.index, start_time=seg.start_time, end_time=seg.end_time,
             text=seg.text, audio_hash=a["model_input_hash"], source=source_id,
@@ -120,26 +127,30 @@ def build_extension_payload(
         seg_ids.append(node.id)
         groups.setdefault(seg.pseg_index, []).append(node.id)
 
-    edges = grouped_spine_edges([(asegs[i]["id"], groups[i]) for i in sorted(groups)])
+    # The fine spine hangs under each segment's RENDITION (PART_OF rendition).
+    edges = grouped_spine_edges([(asegs[i]["rendition"], groups[i]) for i in sorted(groups)])
     ids = {"source": source_id, "segments": seg_ids,
-           "audio_segments": [a["id"] for a in asegs],
+           "audio_segments": [a["audio_segment"] for a in asegs],
+           "renditions": [a["rendition"] for a in asegs],
            "transcripts_used": sorted(used_transcripts)}
     return nodes, edges, ids
 
 # %% ../nbs/graph.ipynb #9be74b79
 @dataclass
 class SourceVerification:
-    """Skeptical-lens verification of one Source's fine-spine extension,
-    computed by querying the graph directly (never trusting run state)."""
+    """Skeptical-lens verification of one Source's fine-spine extension under a
+    specific rendition set, computed by querying the graph directly (never
+    trusting run state)."""
     source_id: str             # Verified Source node id
     title: str                 # Source title (read back from the graph)
-    audio_segment_count: int   # AudioSegment nodes found under the Source
-    segment_count: int         # Fine Segment nodes found under those AudioSegments
+    audio_segment_count: int   # AudioSegment nodes found under the Source (coarse spine; rendition-independent)
+    rendition_count: int       # AudioRendition nodes the fine spine was scoped to (the run's extended renditions)
+    segment_count: int         # Fine Segment nodes found under those renditions
     source_starts_with: bool   # Exactly 1 STARTS_WITH Source -> first AudioSegment
     aseg_next_complete: bool   # Coarse NEXT count == audio_segment_count - 1
     seg_next_complete: bool    # Fine NEXT count == segment_count - 1 (source-wide chain)
-    part_of_complete: bool     # Fine PART_OF count == segment_count
-    aseg_starts_with_complete: bool  # STARTS_WITH from AudioSegments == #AudioSegments owning >=1 Segment
+    part_of_complete: bool     # Fine PART_OF count == segment_count (Segment -> rendition)
+    rendition_starts_with_complete: bool  # STARTS_WITH from renditions == #renditions owning >=1 Segment
     all_have_timing: bool      # Every Segment has start_time + end_time
     all_have_sources: bool     # Every Segment has >=1 SourceRef (the audio ref at minimum)
     source_locators: List[str] = field(default_factory=list)  # Distinct provenance locator URIs
@@ -149,24 +160,28 @@ class SourceVerification:
         """All structural checks pass."""
         return (self.source_starts_with and self.aseg_next_complete
                 and self.seg_next_complete and self.part_of_complete
-                and self.aseg_starts_with_complete and self.all_have_timing
+                and self.rendition_starts_with_complete and self.all_have_timing
                 and self.all_have_sources)
 
 # %% ../nbs/graph.ipynb #9a42dffb
 async def verify_source(
-    queue: JobQueue,  # Started job queue
-    graph_id: str,    # Graph-storage capability id
-    source_id: str,   # Source node id to verify
+    queue: JobQueue,          # Started job queue
+    graph_id: str,            # Graph-storage capability id
+    source_id: str,           # Source node id to verify
+    rendition_ids: List[str], # The AudioRendition ids the run extended (the fine spine is scoped to these)
 ) -> Optional[SourceVerification]:  # Result, or None if the Source is not found
     """Verify a Source's committed extension via server-side AGGREGATES (D13/D19).
 
     Two-layer verification for the Source-rooted schema: the coarse spine
-    (Source → AudioSegments) is checked with id-list edge counts; the fine
-    spine is scoped through the batched far-end constraint
-    `RelationPredicate("PART_OF", node_ids=aseg_ids)` (the C17 batch shape) —
-    never a whole-neighborhood materialization. One bounded projection pass
-    (sources + audio_segment_id) yields missing-sources, distinct locators,
-    AND the per-AudioSegment ownership set for the STARTS_WITH check.
+    (Source → AudioSegments) is checked with id-list edge counts (rendition-
+    independent); the fine spine hangs under the run's AudioRendition set, so it
+    is scoped through the batched far-end constraint
+    `RelationPredicate("PART_OF", node_ids=rendition_ids)` (the C17 batch shape) —
+    never a whole-neighborhood materialization, and never mixing a sibling
+    rendition's spine (raw vs vocals coexist under the same AudioSegments). One
+    bounded projection pass (sources + rendition_id) yields missing-sources,
+    distinct locators, AND the per-rendition ownership set for the STARTS_WITH
+    check.
     """
     src = await graph_task(queue, graph_id, "get_node", node_id=source_id)
     if src is None:
@@ -178,45 +193,47 @@ async def verify_source(
         res = await graph_task(queue, graph_id, "query_edges", query=q.to_dict())
         return int(res.count or 0)
 
-    # Coarse layer: ordered AudioSegment ids under the Source.
+    # Coarse layer: ordered AudioSegment ids under the Source (rendition-independent).
     aq = NodeQuery(label=TranscriptGraphLabels.AUDIO_SEGMENT,
                    related=RelationPredicate(SpineRelations.PART_OF, node_id=source_id),
                    order_by=OrderBy("index"), project=["index"])
     ares = await graph_task(queue, graph_id, "query_nodes", query=aq.to_dict())
     aseg_ids = [r["id"] for r in (ares.rows or [])]
     n_asegs = len(aseg_ids)
-    if not aseg_ids:
+    rendition_ids = list(rendition_ids or [])
+    if not aseg_ids or not rendition_ids:
         return SourceVerification(
             source_id=source_id, title=props.get("title", "Untitled"),
-            audio_segment_count=0, segment_count=0, source_starts_with=False,
+            audio_segment_count=n_asegs, rendition_count=len(rendition_ids),
+            segment_count=0, source_starts_with=False,
             aseg_next_complete=False, seg_next_complete=False, part_of_complete=False,
-            aseg_starts_with_complete=False, all_have_timing=False, all_have_sources=False)
+            rendition_starts_with_complete=False, all_have_timing=False, all_have_sources=False)
 
     src_starts = await _ecount(relation_type=SpineRelations.STARTS_WITH, source_id=source_id)
     aseg_next = await _ecount(relation_type=SpineRelations.NEXT, source_ids=aseg_ids)
 
-    # Fine layer, scoped via the batched far-end constraint.
-    part_of_aseg = RelationPredicate(SpineRelations.PART_OF, node_ids=aseg_ids)
+    # Fine layer, scoped via the batched far-end constraint onto THIS run's renditions.
+    part_of_rend = RelationPredicate(SpineRelations.PART_OF, node_ids=rendition_ids)
 
     async def _ncount(**kw):
-        q = NodeQuery(label=TranscriptGraphLabels.SEGMENT, related=part_of_aseg, count=True, **kw)
+        q = NodeQuery(label=TranscriptGraphLabels.SEGMENT, related=part_of_rend, count=True, **kw)
         res = await graph_task(queue, graph_id, "query_nodes", query=q.to_dict())
         return int(res.count or 0)
 
     n_segs = await _ncount()
-    seg_next = await _ecount(relation_type=SpineRelations.NEXT, source_related=part_of_aseg)
-    seg_part_of = await _ecount(relation_type=SpineRelations.PART_OF, target_ids=aseg_ids)
-    aseg_starts = await _ecount(relation_type=SpineRelations.STARTS_WITH, source_ids=aseg_ids)
+    seg_next = await _ecount(relation_type=SpineRelations.NEXT, source_related=part_of_rend)
+    seg_part_of = await _ecount(relation_type=SpineRelations.PART_OF, target_ids=rendition_ids)
+    rend_starts = await _ecount(relation_type=SpineRelations.STARTS_WITH, source_ids=rendition_ids)
     missing_start = await _ncount(where=[PropertyPredicate("start_time", "is_null")])
     missing_end = await _ncount(where=[PropertyPredicate("end_time", "is_null")])
 
-    # Bounded projection: sources + owning AudioSegment in ONE pass.
-    sq = NodeQuery(label=TranscriptGraphLabels.SEGMENT, related=part_of_aseg,
-                   project=["sources", "audio_segment_id"])
+    # Bounded projection: sources + owning rendition in ONE pass.
+    sq = NodeQuery(label=TranscriptGraphLabels.SEGMENT, related=part_of_rend,
+                   project=["sources", "rendition_id"])
     res = await graph_task(queue, graph_id, "query_nodes", query=sq.to_dict())
     missing_sources = 0
     locators = set()
-    owning_asegs = set()
+    owning_renditions = set()
     for r in (res.rows or []):
         sources = r.get("sources") or []
         if not sources:
@@ -224,19 +241,20 @@ async def verify_source(
         for s in sources:
             ref = SourceRef.from_dict(s) if isinstance(s, dict) else s
             locators.add(ref.locator.to_uri())
-        if r.get("audio_segment_id"):
-            owning_asegs.add(r["audio_segment_id"])
+        if r.get("rendition_id"):
+            owning_renditions.add(r["rendition_id"])
 
     return SourceVerification(
         source_id=source_id,
         title=props.get("title", "Untitled"),
         audio_segment_count=n_asegs,
+        rendition_count=len(rendition_ids),
         segment_count=n_segs,
         source_starts_with=src_starts == 1,
         aseg_next_complete=aseg_next == max(0, n_asegs - 1),
         seg_next_complete=seg_next == max(0, n_segs - 1),
         part_of_complete=seg_part_of == n_segs,
-        aseg_starts_with_complete=aseg_starts == len(owning_asegs),
+        rendition_starts_with_complete=rend_starts == len(owning_renditions),
         all_have_timing=(missing_start == 0 and missing_end == 0),
         all_have_sources=missing_sources == 0,
         source_locators=sorted(locators),

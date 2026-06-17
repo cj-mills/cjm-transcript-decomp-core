@@ -360,9 +360,10 @@ async def run_decomp(
     Stage 5 (decomp-as-extender): the graph ROOT must already exist — decomp
     recomputes the deterministic root ids from the manifest, verifies the
     Source node is present (loud error pointing at transcription emission
-    otherwise), aligns per transcriber, and attaches the fine spine via the
-    layer's idempotent `extend_graph` (re-runs verify-collide). The fold is
-    declared as a `Derivation` event when segments were actually created.
+    otherwise), aligns per transcriber, and attaches the fine spine under the
+    run's AudioRendition (PART_OF rendition) via the layer's idempotent
+    `extend_graph` (re-runs verify-collide). The fold is declared as a
+    `Derivation` event when segments were actually created.
     """
     run_id = run_id or new_run_id()
     # CR-14 follow-up: queue-scoped run context — every job submitted in this
@@ -452,15 +453,17 @@ async def run_decomp(
                 dn, de = derivation_to_graph(d)
                 await extend_graph(queue, cfg.graph_plugin, [dn], de)
 
-            vr = await verify_source(queue, cfg.graph_plugin, ids["source"])
+            # Fine spine hangs under the run's renditions — verify scopes there.
+            vr = await verify_source(queue, cfg.graph_plugin, ids["source"], ids["renditions"])
             if vr is None:
                 logger.error(f"[src {i}] verify: Source {ids['source']} NOT FOUND in graph")
             else:
                 logger.info(f"[src {i}] verify: {'OK' if vr.ok else 'FAILED'} "
-                            f"(asegs={vr.audio_segment_count}, segments={vr.segment_count}, "
+                            f"(asegs={vr.audio_segment_count}, renditions={vr.rendition_count}, "
+                            f"segments={vr.segment_count}, "
                             f"src_starts={vr.source_starts_with}, aseg_next={vr.aseg_next_complete}, "
                             f"seg_next={vr.seg_next_complete}, part_of={vr.part_of_complete}, "
-                            f"aseg_starts={vr.aseg_starts_with_complete}, "
+                            f"rend_starts={vr.rendition_starts_with_complete}, "
                             f"timing={vr.all_have_timing}, sources={vr.all_have_sources})")
 
             # I14: verify outcomes are journal ROWS (absence of a log line is not
