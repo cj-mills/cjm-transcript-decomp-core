@@ -118,9 +118,9 @@ class DecompSegment:
 @dataclass
 class DecompConfig:
     """Configuration for one transcript-decomposition run."""
-    vad_plugin: str = "cjm-media-plugin-silero-vad"                    # VAD capability id
-    fa_plugin: str = "cjm-transcription-plugin-qwen3-forced-aligner"  # Forced-alignment capability id
-    graph_plugin: str = "cjm-graph-plugin-sqlite"                     # Graph-storage capability id
+    vad_plugin: str = "cjm-capability-silero-vad"                    # VAD capability id
+    fa_plugin: str = "cjm-capability-qwen3-forced-aligner"  # Forced-alignment capability id
+    graph_plugin: str = "cjm-capability-graph-sqlite"                     # Graph-storage capability id
     text_from: Optional[str] = None  # Authoritative transcriber for layer-0 text (None: sole transcriber; REQUIRED for multi-transcriber manifests)
     language: str = "English"  # Forced-alignment language
     media_type: str = "audio"  # Source media type

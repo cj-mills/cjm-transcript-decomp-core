@@ -15,8 +15,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from cjm_plugin_system.core.manager import PluginManager
-from cjm_plugin_system.core.queue import JobQueue
+from cjm_substrate.core.manager import CapabilityManager
+from cjm_substrate.core.queue import JobQueue
 
 from .models import DecompConfig
 from .pipeline import run_decomp, load_source_manifest
@@ -35,9 +35,9 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     run = sub.add_parser("run", help="Extend a transcription-emitted graph root with the fine spine")
     run.add_argument("manifest", help="Transcription-core run manifest JSON (the source to decompose)")
     run.add_argument("--manifests-dir", default=".cjm/manifests", help="Capability manifests directory")
-    run.add_argument("--vad-plugin", default="cjm-media-plugin-silero-vad", help="VAD capability name")
-    run.add_argument("--fa-plugin", default="cjm-transcription-plugin-qwen3-forced-aligner", help="Forced-alignment capability name")
-    run.add_argument("--graph-plugin", default="cjm-graph-plugin-sqlite", help="Graph-storage capability name")
+    run.add_argument("--vad-plugin", default="cjm-capability-silero-vad", help="VAD capability name")
+    run.add_argument("--fa-plugin", default="cjm-capability-qwen3-forced-aligner", help="Forced-alignment capability name")
+    run.add_argument("--graph-plugin", default="cjm-capability-graph-sqlite", help="Graph-storage capability name")
     run.add_argument("--graph-db-path", default=None,
                      help="Explicit graph DB path override (F10; scratch-graph loop-backs; default: the capability's configured db_path)")
     run.add_argument("--text-from", default=None,
@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
 
 # %% ../nbs/cli.ipynb #607602e9
 def load_capabilities(
-    manager: PluginManager,   # Freshly constructed manager
+    manager: CapabilityManager,   # Freshly constructed manager
     instance_ids: List[str],  # Capability names to load (default instances), in order
     configs: Optional[Dict[str, Dict[str, Any]]] = None,  # Per-capability config overrides (caller-wins, C8)
 ) -> None:
@@ -70,7 +70,7 @@ def load_capabilities(
                 f"capability {iid!r} not found in manifests "
                 f"(discovered: {sorted(discovered)}) — run cjm-ctl install-all first"
             )
-        if not manager.load_plugin(meta, config=(configs or {}).get(iid)):
+        if not manager.load_capability(meta, config=(configs or {}).get(iid)):
             raise SystemExit(f"failed to load capability {iid!r}")
         logger.info(f"loaded {iid}")
 
@@ -96,9 +96,9 @@ async def run_command(
     # CR-7 GPU subtree attribution is opt-in: --sysmon-plugin threads the monitor
     # name into BOTH the manager and the queue; the monitor loads FIRST so GPU
     # capabilities' samples record gpu_memory_mb_peak (voxtral-vllm e2e pattern).
-    manager = PluginManager(
+    manager = CapabilityManager(
         search_paths=[Path(args.manifests_dir)],
-        sysmon_plugin_name=args.sysmon_plugin,
+        sysmon_capability_name=args.sysmon_plugin,
     )
     instance_ids = [cfg.vad_plugin, cfg.fa_plugin, cfg.graph_plugin]
     load_order = ([args.sysmon_plugin] if args.sysmon_plugin else []) + instance_ids
@@ -108,7 +108,7 @@ async def run_command(
                if args.graph_db_path else None)
     load_capabilities(manager, load_order, configs=configs)
 
-    queue = JobQueue(deps=manager, sysmon_plugin_name=args.sysmon_plugin)
+    queue = JobQueue(deps=manager, sysmon_capability_name=args.sysmon_plugin)
     await queue.start()
     try:
         # CR-14 follow-up: actor attribution (operator identity by default;
@@ -119,7 +119,7 @@ async def run_command(
         await queue.stop()
         for iid in reversed(load_order):  # Reverse load order; the monitor unloads last
             try:
-                manager.unload_plugin(iid)
+                manager.unload_capability(iid)
             except Exception as e:  # Best-effort teardown; never mask the run's outcome
                 logger.warning(f"unload {iid} failed: {e}")
 

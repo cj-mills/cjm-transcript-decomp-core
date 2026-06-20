@@ -171,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
 
 ``` python
 def load_capabilities(
-    manager: PluginManager,   # Freshly constructed manager
+    manager: CapabilityManager,   # Freshly constructed manager
     instance_ids: List[str],  # Capability names to load (default instances), in order
 ) -> None
     "Discover manifests + load each requested capability (default instance)."
@@ -402,9 +402,9 @@ class DecompSegment:
 class DecompConfig:
     "Configuration for one transcript-decomposition run."
     
-    vad_plugin: str = 'cjm-media-plugin-silero-vad'  # VAD capability id
-    fa_plugin: str = 'cjm-transcription-plugin-qwen3-forced-aligner'  # Forced-alignment capability id
-    graph_plugin: str = 'cjm-graph-plugin-sqlite'  # Graph-storage capability id
+    vad_plugin: str = 'cjm-capability-silero-vad'  # VAD capability id
+    fa_plugin: str = 'cjm-capability-qwen3-forced-aligner'  # Forced-alignment capability id
+    graph_plugin: str = 'cjm-capability-graph-sqlite'  # Graph-storage capability id
     language: str = 'English'  # Forced-alignment language
     media_type: str = 'audio'  # Document media type
     force: bool = False  # Bypass capability-side caches (VAD + FA)
@@ -584,7 +584,7 @@ def confirm_seam(
 
 ``` python
 def collect_plugin_info(
-    manager: PluginManager,   # Manager holding the loaded capabilities
+    manager: CapabilityManager,   # Manager holding the loaded capabilities
     instance_ids: List[str],  # Instance ids to record
 ) -> Dict[str, Dict[str, Any]]:  # instance_id -> {name, version, db_path}
     "Record capability identity + data-DB pointers for the run manifest (provenance)."
@@ -592,7 +592,7 @@ def collect_plugin_info(
 
 ``` python
 async def run_decomp(
-    manager: PluginManager,        # Manager with VAD + FA + graph capabilities loaded
+    manager: CapabilityManager,        # Manager with VAD + FA + graph capabilities loaded
     queue: JobQueue,               # Started job queue
     cfg: DecompConfig,             # Run configuration
     source_manifest_path: str,     # Transcription run manifest to decompose

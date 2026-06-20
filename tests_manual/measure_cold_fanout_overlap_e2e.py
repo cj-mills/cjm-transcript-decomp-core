@@ -27,18 +27,18 @@ import sys
 import time
 from pathlib import Path
 
-from cjm_plugin_system.core.manager import PluginManager
-from cjm_plugin_system.core.queue import JobQueue
+from cjm_substrate.core.manager import CapabilityManager
+from cjm_substrate.core.queue import JobQueue
 from cjm_transcript_decomp_core.cli import load_capabilities
 from cjm_transcript_decomp_core.models import DecompConfig
 from cjm_transcript_decomp_core.pipeline import run_decomp
 
 SCRATCH_DB = "/tmp/stage5_closeout_scratch/context_graph.db"
-SYSMON = "cjm-system-monitor-nvidia"
-VAD = "cjm-media-plugin-silero-vad"
-FA = "cjm-transcription-plugin-qwen3-forced-aligner"
-GRAPH = "cjm-graph-plugin-sqlite"
-TEXT_FROM = "cjm-transcription-plugin-voxtral-hf"  # accuracy authority
+SYSMON = "cjm-capability-monitor-nvidia"
+VAD = "cjm-capability-silero-vad"
+FA = "cjm-capability-qwen3-forced-aligner"
+GRAPH = "cjm-capability-graph-sqlite"
+TEXT_FROM = "cjm-capability-voxtral-hf"  # accuracy authority
 
 
 def lane_intervals(jobs, instance_id):
@@ -103,10 +103,10 @@ async def main():
         force=False,  # fresh sources are cold by content
         assume_yes=True,
     )
-    manager = PluginManager(search_paths=[Path(".cjm/manifests")], sysmon_plugin_name=SYSMON)
+    manager = CapabilityManager(search_paths=[Path(".cjm/manifests")], sysmon_capability_name=SYSMON)
     load_order = [SYSMON, VAD, FA, GRAPH]
     load_capabilities(manager, load_order, configs={GRAPH: {"db_path": SCRATCH_DB}})
-    queue = JobQueue(deps=manager, sysmon_plugin_name=SYSMON)
+    queue = JobQueue(deps=manager, sysmon_capability_name=SYSMON)
     await queue.start()
     t0 = time.monotonic()
     try:
@@ -144,7 +144,7 @@ async def main():
         await queue.stop()
         for iid in reversed(load_order):
             try:
-                manager.unload_plugin(iid)
+                manager.unload_capability(iid)
             except Exception as e:
                 print(f"unload {iid} failed: {e}")
 

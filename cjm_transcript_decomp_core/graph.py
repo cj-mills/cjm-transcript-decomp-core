@@ -19,7 +19,7 @@ __all__ = ['resolve_root_ids', 'build_extension_payload', 'SourceVerification', 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_plugin_system.core.queue import JobQueue
+from cjm_substrate.core.queue import JobQueue
 from cjm_context_graph_primitives.provenance import SourceRef
 from cjm_context_graph_primitives.graph import GraphNode
 # Stage 4: typed query expressions + results (importing the result classes IS

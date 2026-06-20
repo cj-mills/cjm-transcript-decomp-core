@@ -22,13 +22,13 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_plugin_system.core.manager import PluginManager
-from cjm_plugin_system.core.queue import JobQueue, JobStatus
-from cjm_plugin_system.core.ports import (
+from cjm_substrate.core.manager import CapabilityManager
+from cjm_substrate.core.queue import JobQueue, JobStatus
+from cjm_substrate.core.ports import (
     Composition, CompositionNode, CompositionRun, NodeState, OutputRef,
 )
-from cjm_plugin_system.core.empirical_store import compute_config_hash
-from cjm_plugin_system.core.journal_store import JournalEvent, SubstrateEventType
+from cjm_substrate.core.empirical_store import compute_config_hash
+from cjm_substrate.core.journal_store import JournalEvent, SubstrateEventType
 
 # Typed wire-kind registration (stage 2): importing the DTO classes is what
 # lets the proxy's wire_decode hand this host process TYPED results. Both result
@@ -291,7 +291,7 @@ def confirm_seam(
 
 # %% ../nbs/pipeline.ipynb #399bdc65
 def collect_plugin_info(
-    manager: PluginManager,   # Manager holding the loaded capabilities
+    manager: CapabilityManager,   # Manager holding the loaded capabilities
     instance_ids: List[str],  # Instance ids to record
 ) -> Dict[str, Dict[str, Any]]:  # instance_id -> {name, version, db_path, config_hash}
     """Record capability identity + data-DB pointers for the run manifest (provenance).
@@ -311,7 +311,7 @@ def collect_plugin_info(
         manifest = getattr(meta, "manifest", {}) or {}
         current_config: Dict[str, Any] = {}
         try:
-            proxy = manager.get_plugin(iid)
+            proxy = manager.get_capability(iid)
             if proxy is not None:
                 current_config = proxy.get_current_config() or {}
         except Exception as e:  # Best-effort: identity recording must not fail the run
@@ -327,7 +327,7 @@ def collect_plugin_info(
 
 # %% ../nbs/pipeline.ipynb #820f2b75
 def _journal_run_event(
-    manager: PluginManager,  # Manager owning the journal store
+    manager: CapabilityManager,  # Manager owning the journal store
     event_type: str,         # SubstrateEventType value (run_started / run_finished / verify_outcome)
     run_id: str,             # This run's manifest id
     actor: Optional[str],    # Who/what initiated the run
@@ -348,7 +348,7 @@ def _journal_run_event(
 
 # %% ../nbs/pipeline.ipynb #bd2fd10f
 async def run_decomp(
-    manager: PluginManager,        # Manager with VAD + FA + graph capabilities loaded
+    manager: CapabilityManager,        # Manager with VAD + FA + graph capabilities loaded
     queue: JobQueue,               # Started job queue
     cfg: DecompConfig,             # Run configuration
     source_manifest_path: str,     # Transcription run manifest to decompose

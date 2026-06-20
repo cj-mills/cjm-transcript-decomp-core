@@ -45,7 +45,7 @@ DECOMP = BASE / "cjm-transcript-decomp-core"
 CORRECTION = BASE / "cjm-transcript-correction-core"
 ENVS = Path.home() / "miniforge3/envs"
 SN1_MANIFEST = BASE / "cjm-transcription-core/runs/stage5_sn1.json"
-CORPUS_DB = DECOMP / ".cjm/data/cjm-graph-plugin-sqlite/context_graph.db"
+CORPUS_DB = DECOMP / ".cjm/data/cjm-capability-graph-sqlite/context_graph.db"
 SCRATCH_DB = Path("/tmp/stage7_volume_scratch_graph.db")
 DECOMP_OUT = Path("/tmp/stage7_volume_decomp.json")
 ACTOR = "stress:stage7-part6"
@@ -98,9 +98,9 @@ def main() -> None:
     proc = subprocess.run(
         [str(ENVS / "cjm-transcript-decomp-core/bin/cjm-transcript-decomp-core"),
          "run", str(SN1_MANIFEST),
-         "--text-from", "cjm-transcription-plugin-whisper",
+         "--text-from", "cjm-capability-whisper",
          "--graph-db-path", str(SCRATCH_DB),
-         "--sysmon-plugin", "cjm-system-monitor-nvidia",
+         "--sysmon-plugin", "cjm-capability-monitor-nvidia",
          "--actor", ACTOR,
          "--output", str(DECOMP_OUT), "--yes"],
         cwd=DECOMP, capture_output=True, text=True)
