@@ -14,9 +14,9 @@ pip install cjm_transcript_decomp_core
     nbs/
     ├── alignment.ipynb # Pure forced-alignment logic (no capability calls): map FA words back to character spans
     ├── cli.ipynb       # The CLI driver — the decomposition core's first (and currently only) frontend.
-    ├── graph.ipynb     # Graph-spine construction, commit, and skeptical-lens verification. Builds Document +
+    ├── graph.ipynb     # Graph-spine EXTENSION + skeptical-lens verification (stage 5, CR-18 revolution 2).
     ├── models.ipynb    # Lean data shapes for the transcript-decomposition pipeline: in-core mirrors of the
-    └── pipeline.ipynb  # The headless decomposition pipeline: load a transcription run manifest, then per source
+    └── pipeline.ipynb  # The headless decomposition pipeline (stage 5: decomp is an EXTENDER). Load a
 
 Total: 5 notebooks
 
@@ -31,8 +31,8 @@ graph LR
     pipeline["pipeline<br/>pipeline"]
 
     alignment --> models
-    cli --> models
     cli --> pipeline
+    cli --> models
     graph_mod --> models
     pipeline --> models
     pipeline --> graph_mod
@@ -47,11 +47,12 @@ graph LR
 
     usage: cjm-transcript-decomp-core [-h] {run} ...
 
-    Headless transcript decomposition: VAD + forced alignment -> graph spine.
+    Headless transcript decomposition: VAD + forced alignment -> fine-spine graph
+    extension.
 
     positional arguments:
       {run}
-        run       Decompose a transcription-core run manifest
+        run       Extend a transcription-emitted graph root with the fine spine
 
     options:
       -h, --help  show this help message and exit
@@ -173,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
 def load_capabilities(
     manager: CapabilityManager,   # Freshly constructed manager
     instance_ids: List[str],  # Capability names to load (default instances), in order
+    configs: Optional[Dict[str, Dict[str, Any]]] = None,  # Per-capability config overrides (caller-wins, C8)
 ) -> None
     "Discover manifests + load each requested capability (default instance)."
 ```
@@ -180,8 +182,8 @@ def load_capabilities(
 ``` python
 async def run_command(
     args: argparse.Namespace,  # Parsed CLI arguments for the `run` subcommand
-) -> int:  # Process exit code (0 = all sources decomposed + committed)
-    "Execute the `run` subcommand: decompose a transcription manifest into a graph spine."
+) -> int:  # Process exit code (0 = all sources extended + verified)
+    "Execute the `run` subcommand: extend a transcription-emitted root with the fine spine."
 ```
 
 ``` python
@@ -193,83 +195,79 @@ def main(
 
 ### graph (`graph.ipynb`)
 
-> Graph-spine construction, commit, and skeptical-lens verification.
-> Builds Document +
+> Graph-spine EXTENSION + skeptical-lens verification (stage 5, CR-18
+> revolution 2).
 
 #### Import
 
 ``` python
 from cjm_transcript_decomp_core.graph import (
-    build_source_ref,
-    build_graph_payload,
-    commit_graph,
-    VerificationResult,
-    verify_document
+    resolve_root_ids,
+    build_extension_payload,
+    SourceVerification,
+    verify_source
 )
 ```
 
 #### Functions
 
 ``` python
-def build_source_ref(
-    seg: DecompSegment,  # Aligned segment carrying upstream provenance
-    manifest_path: str,  # Path to the consumed transcription run manifest
-) -> Optional[SourceRef]:  # Provenance ref, or None when source info is absent
+def resolve_root_ids(
     """
-    Build a manifest-anchored SourceRef for one segment.
+    Recompute the transcription-emitted root node ids from manifest data.
     
-    Revolution-1 provenance shape: anchor to the consumed run manifest rather
-    than the transcription DB row, because cache-hit transcriptions leave the
-    manifest job_id absent from the capability DB (E13 — manifest-vs-row dangle).
-    `plugin_name` reuses the `external:<path>` scheme (the canonical SourceRef
-    over-fit hack; direct CR-19 generalization evidence). `content_hash` verifies
-    the consumed text regardless of whether the row still exists.
+    Deterministic identity makes the extender lookup a RECOMPUTATION, not a
+    search: Source = content hash; AudioSegment = (source, boundary range);
+    AudioRendition = (audio segment, preprocessing chain) — the per-source
+    `chain` ([] = raw convert-only) carried by the 0.3.0 manifest; Transcript =
+    (rendition, transcriber, config_hash). No stored-id coupling between the
+    cores. A pre-0.3.0 manifest (no `chain`) recomputes the raw rendition ids
+    (empty chain), which is correct for any non-preprocessed run.
     """
 ```
 
 ``` python
-def build_graph_payload(
-    title: str,                     # Document title
-    segments: List[DecompSegment],  # Ordered aligned segments (source-coord timing)
-    manifest_path: str,             # Consumed manifest path (for SourceRefs)
-    media_type: str = "audio",      # Document media type
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str, List[str]]:  # (nodes, edges, doc_id, seg_ids)
+def build_extension_payload(
+    source_entry: Dict[str, Any],             # One source entry from the transcription manifest
+    capabilities_info: Dict[str, Dict[str, Any]],  # The transcription manifest's capabilities block
+    vad_config_hash: str,                     # THIS run's VAD capability config hash (skeleton identity input)
+    text_from: str,                           # Authoritative transcriber (layer-0 text designation)
+    segments: List[DecompSegment],            # Ordered aligned segments (per-transcriber variants attached)
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:  # (nodes, edges, ids)
     """
-    Build the (nodes, edges, document_id, segment_ids) graph payload.
+    Build the fine-spine EXTENSION payload (pure; no capability calls).
     
-    Pure: assembles Document + Segment nodes and STARTS_WITH / NEXT / PART_OF
-    edges as wire dicts; no capability calls (commit happens in `commit_graph`).
+    Segment identity is audio-side (audio RENDITION, VAD config, chunk range) —
+    shared across transcribers by construction, distinct per rendition (vocals
+    isolation can yield different VAD chunking than raw). Each Segment carries
+    the audio `TimeSlice` ref into its rendition + one `CharSlice` ref per
+    transcriber variant; `text_from` is recorded per segment as provenance
+    (which Transcript the layer-0 text came from), never as global config. Edges
+    come from `grouped_spine_edges`: PART_OF to the OWNING AudioRendition,
+    STARTS_WITH per rendition, NEXT chained source-wide across coarse boundaries.
     """
 ```
 
 ``` python
-async def commit_graph(
-    queue: JobQueue,              # Started job queue
-    graph_id: str,               # Graph-storage capability id
-    nodes: List[Dict[str, Any]],  # Node wire dicts from build_graph_payload
-    edges: List[Dict[str, Any]],  # Edge wire dicts from build_graph_payload
-) -> Dict[str, int]:  # {"nodes": n, "edges": m} created counts
+async def verify_source(
+    queue: JobQueue,          # Started job queue
+    graph_id: str,            # Graph-storage capability id
+    source_id: str,           # Source node id to verify
+    rendition_ids: List[str], # The AudioRendition ids the run extended (the fine spine is scoped to these)
+) -> Optional[SourceVerification]:  # Result, or None if the Source is not found
     """
-    Commit nodes then edges to the graph capability via the job queue.
+    Verify a Source's committed extension via server-side AGGREGATES (D13/D19).
     
-    Goes through `JobQueue` (not a direct `execute_plugin_async`) so graph writes
-    get empirical samples + sysmon attribution like every other capability call
-    (the GUI GraphService used the direct path — pass-2 two-invocation-paths note).
-    """
-```
-
-``` python
-async def verify_document(
-    queue: JobQueue,   # Started job queue
-    graph_id: str,     # Graph-storage capability id
-    document_id: str,  # Document node id to verify
-) -> Optional[VerificationResult]:  # Result, or None if the document is not found
-    """
-    Verify a committed document by querying the graph (depth-2 context).
-    
-    Skeptical lens: trusts the graph, not the run state — re-reads STARTS_WITH /
-    NEXT / PART_OF edges, timing, and source refs from storage. Depth 2 is needed
-    so the NEXT edges between discovered Segments are included.
+    Two-layer verification for the Source-rooted schema: the coarse spine
+    (Source → AudioSegments) is checked with id-list edge counts (rendition-
+    independent); the fine spine hangs under the run's AudioRendition set, so it
+    is scoped through the batched far-end constraint
+    `RelationPredicate("PART_OF", node_ids=rendition_ids)` (the C17 batch shape) —
+    never a whole-neighborhood materialization, and never mixing a sibling
+    rendition's spine (raw vs vocals coexist under the same AudioSegments). One
+    bounded projection pass (sources + rendition_id) yields missing-sources,
+    distinct locators, AND the per-rendition ownership set for the STARTS_WITH
+    check.
     """
 ```
 
@@ -277,18 +275,26 @@ async def verify_document(
 
 ``` python
 @dataclass
-class VerificationResult:
-    "Skeptical-lens verification computed by querying the graph directly."
+class SourceVerification:
+    """
+    Skeptical-lens verification of one Source's fine-spine extension under a
+    specific rendition set, computed by querying the graph directly (never
+    trusting run state).
+    """
     
-    document_id: str  # Verified Document node id
-    title: str  # Document title (read back from the graph)
-    segment_count: int  # Segment nodes found
-    has_starts_with: bool  # >=1 STARTS_WITH edge from the Document
-    next_chain_complete: bool  # NEXT edge count == segment_count - 1
-    part_of_complete: bool  # PART_OF edge count == segment_count
-    all_have_timing: bool  # Every segment has start_time + end_time
-    all_have_sources: bool  # Every segment has >=1 SourceRef
-    source_plugins: List[str] = field(...)  # Distinct source plugin_names
+    source_id: str  # Verified Source node id
+    title: str  # Source title (read back from the graph)
+    audio_segment_count: int  # AudioSegment nodes found under the Source (coarse spine; rendition-independent)
+    rendition_count: int  # AudioRendition nodes the fine spine was scoped to (the run's extended renditions)
+    segment_count: int  # Fine Segment nodes found under those renditions
+    source_starts_with: bool  # Exactly 1 STARTS_WITH Source -> first AudioSegment
+    aseg_next_complete: bool  # Coarse NEXT count == audio_segment_count - 1
+    seg_next_complete: bool  # Fine NEXT count == segment_count - 1 (source-wide chain)
+    part_of_complete: bool  # Fine PART_OF count == segment_count (Segment -> rendition)
+    rendition_starts_with_complete: bool  # STARTS_WITH from renditions == #renditions owning >=1 Segment
+    all_have_timing: bool  # Every Segment has start_time + end_time
+    all_have_sources: bool  # Every Segment has >=1 SourceRef (the audio ref at minimum)
+    source_locators: List[str] = field(...)  # Distinct provenance locator URIs
     
     def ok(self) -> bool:  # True when every structural check passes
         "All structural checks pass."
@@ -306,9 +312,10 @@ from cjm_transcript_decomp_core.models import (
     FAWord,
     VADChunk,
     TextSegment,
+    SegmentVariant,
     DecompSegment,
     DecompConfig,
-    DecompDocument,
+    DecompSourceRecord,
     DecompManifest,
     new_run_id
 )
@@ -380,18 +387,52 @@ class TextSegment:
 
 ``` python
 @dataclass
-class DecompSegment:
-    "One committed segment of the graph spine (source-coordinate timing)."
+class SegmentVariant:
+    """
+    One transcriber's text + char range for one fine segment (stage 5).
     
-    index: int  # Global 0-based position in the document
-    text: str  # Segment text
-    start_time: float  # Start in source-audio seconds
+    Becomes a `GraphNodeRef(Transcript) + CharSlice` provenance ref on the
+    committed Segment node — text is stored ONCE per transcriber at the coarse
+    Transcript node; fine-grained variants are SLICES, never duplicated text
+    (Thread-1 slices-until-promoted).
+    """
+    
+    transcriber: str  # Transcriber capability name
+    text: str  # This transcriber's text for the chunk
+    start_char: Optional[int]  # Char offset into that transcriber's pipeline-segment text
+    end_char: Optional[int]  # End char offset
+    
+    def to_dict(self) -> Dict[str, Any]:  # Plain-dict form
+            """Serialize to a plain dict."""
+            return asdict(self)
+    
+    
+    @dataclass
+    class DecompSegment
+        "Serialize to a plain dict."
+```
+
+``` python
+@dataclass
+class DecompSegment:
+    """
+    One fine spine segment (stage 5: shared audio-side skeleton + per-transcriber variants).
+    
+    Identity is AUDIO-SIDE (owning pipeline segment + chunk range) — shared
+    across transcribers by construction; `text` is the AUTHORITATIVE
+    (accuracy-transcriber) alignment, with every transcriber's chunk text
+    riding `variants` (the authoritative one included).
+    """
+    
+    index: int  # Source-wide 0-based fine-spine position
+    text: str  # Authoritative text (the --text-from transcriber's alignment; "" = no aligned words)
+    start_time: float  # Start in source-audio seconds (navigation)
     end_time: float  # End in source-audio seconds
-    start_char: Optional[int]  # Char offset into the originating pipeline-segment text
-    end_char: Optional[int]  # Char offset into the originating pipeline-segment text
-    source_job_id: Optional[str]  # Upstream transcription job_id (E13: may dangle under caching)
-    source_provider_id: Optional[str]  # Upstream transcriber capability name
-    vad_chunk_index: int = 0  # Originating VAD chunk index within the pipeline segment
+    chunk_start: float  # VAD chunk start (chunk-local seconds within the pipeline-segment WAV)
+    chunk_end: float  # VAD chunk end (chunk-local seconds)
+    vad_chunk_index: int  # Chunk index within its pipeline segment
+    pseg_index: int  # Owning pipeline-segment (AudioSegment) index within the source
+    variants: List[SegmentVariant] = field(...)  # Per-transcriber chunk texts + char ranges
     
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form
         "Serialize to a plain dict."
@@ -402,11 +443,12 @@ class DecompSegment:
 class DecompConfig:
     "Configuration for one transcript-decomposition run."
     
-    vad_plugin: str = 'cjm-capability-silero-vad'  # VAD capability id
-    fa_plugin: str = 'cjm-capability-qwen3-forced-aligner'  # Forced-alignment capability id
-    graph_plugin: str = 'cjm-capability-graph-sqlite'  # Graph-storage capability id
+    vad_capability: str = 'cjm-capability-silero-vad'  # VAD capability id
+    fa_capability: str = 'cjm-capability-qwen3-forced-aligner'  # Forced-alignment capability id
+    graph_capability: str = 'cjm-capability-graph-sqlite'  # Graph-storage capability id
+    text_from: Optional[str]  # Authoritative transcriber for layer-0 text (None: sole transcriber; REQUIRED for multi-transcriber manifests)
     language: str = 'English'  # Forced-alignment language
-    media_type: str = 'audio'  # Document media type
+    media_type: str = 'audio'  # Source media type
     force: bool = False  # Bypass capability-side caches (VAD + FA)
     assume_yes: bool = False  # Auto-accept HITL seams (headless mode)
     
@@ -416,13 +458,17 @@ class DecompConfig:
 
 ``` python
 @dataclass
-class DecompDocument:
-    "Record of one graph Document produced from one source."
+class DecompSourceRecord:
+    """
+    Record of one Source whose fine spine this run committed (stage 5:
+    `Document` dissolved into `Source` — decomp EXTENDS the transcription-
+    emitted root rather than creating a document).
+    """
     
-    document_id: str  # Graph Document node id
+    source_node_id: str  # Graph Source node id (deterministic; recomputable from the content hash)
     source_path: str  # Originating source audio path (from the upstream manifest)
-    title: str  # Document title
-    segment_count: int  # Number of Segment nodes committed
+    title: str  # Source display title
+    segment_count: int  # Number of fine Segment nodes committed
     segment_ids: List[str] = field(...)  # Graph Segment node ids, in order
     
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form
@@ -432,7 +478,12 @@ class DecompDocument:
 ``` python
 @dataclass
 class DecompManifest:
-    "Durable record of one decomposition run (proto-bundle; see CR-20)."
+    """
+    Durable record of one decomposition run (proto-bundle; see CR-20).
+    
+    Schema 0.2.0 (stage 5): `documents` became `sources` (Document dissolved
+    into Source); entries carry the deterministic Source node id.
+    """
     
     run_id: str  # Unique run identifier
     created_at: float  # Unix timestamp at run start
@@ -440,16 +491,16 @@ class DecompManifest:
     source_manifest: str  # Path to the consumed transcription run manifest
     source_format: str = ''  # Upstream manifest format tag (interchange contract)
     source_version: str = ''  # Upstream manifest schema version
-    plugins: Dict[str, Dict[str, Any]] = field(...)  # instance_id -> identity/db_path
-    documents: List[DecompDocument] = field(...)  # Committed documents, input order
+    capabilities: Dict[str, Dict[str, Any]] = field(...)  # instance_id -> identity/db_path/config_hash
+    sources: List[DecompSourceRecord] = field(...)  # Extended sources, input order
     FORMAT: str = field(...)  # Format tag
     VERSION: str = field(...)  # Schema version
     
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form for JSON serialization
-            """Serialize to a plain dict with nested documents."""
+            """Serialize to a plain dict with nested sources."""
             return {
                 "format": self.FORMAT,
-        "Serialize to a plain dict with nested documents."
+        "Serialize to a plain dict with nested sources."
     
     def save(
             self,
@@ -460,41 +511,27 @@ class DecompManifest:
 
 ### pipeline (`pipeline.ipynb`)
 
-> The headless decomposition pipeline: load a transcription run
-> manifest, then per source
+> The headless decomposition pipeline (stage 5: decomp is an EXTENDER).
+> Load a
 
 #### Import
 
 ``` python
 from cjm_transcript_decomp_core.pipeline import (
     logger,
-    field_of,
     submit_and_wait,
     load_source_manifest,
-    analyze_segment_vad,
-    align_segment,
+    vad_chunks_from_result,
+    fa_words_from_result,
+    build_alignment_composition,
     decompose_source,
     confirm_seam,
-    collect_plugin_info,
+    collect_capability_info,
     run_decomp
 )
 ```
 
 #### Functions
-
-``` python
-def field_of(
-    result: Any,          # Capability result — dict over the proxy wire, object in-process
-    key: str,             # Field name to read
-    default: Any = None,  # Fallback when absent
-) -> Any:  # The field value or the default
-    """
-    Read a field from a dict-or-object capability result.
-    
-    Re-implemented here rather than shared (Nth ecosystem copy — pass-2 evidence
-    E5: results need a typed wire layer, not per-core tolerance helpers).
-    """
-```
 
 ``` python
 async def submit_and_wait(
@@ -514,30 +551,48 @@ def load_source_manifest(
 ```
 
 ``` python
-async def analyze_segment_vad(
-    queue: JobQueue,
-    vad_id: str,          # VAD capability instance id
-    audio_path: str,      # Pipeline-segment audio file (model-input WAV)
-    force: bool = False,  # Bypass the VAD cache
+def vad_chunks_from_result(
+    result: VADResult,  # Typed VAD result (wire-decoded at the proxy)
 ) -> List[VADChunk]:  # Segment-local VAD chunks, sorted, re-indexed
     """
-    Run VAD on one pipeline-segment audio file -> segment-local VAD chunks.
+    Normalize a typed VAD result into segment-local VAD chunks.
     
-    Per-segment VAD (not whole-source) is the validated decomp path; it was
-    originally chosen to avoid browser Web-Audio limits on hours-long source
-    audio in the GUI (a presentation constraint), and holds on the merits here.
+    Pure normalizer (stage 3): the capability invocation moved into the
+    per-source composition (`build_alignment_composition`); this folds one
+    node's typed result. Per-segment VAD (not whole-source) is the validated
+    decomp path — originally a browser Web-Audio constraint, kept on the
+    merits (D11).
     """
 ```
 
 ``` python
-async def align_segment(
-    queue: JobQueue,
-    fa_id: str,           # Forced-alignment capability instance id
-    audio_path: str,      # Pipeline-segment audio file (model-input WAV)
-    text: str,            # Transcript text for this pipeline segment
-    force: bool = False,  # Bypass the FA cache
+def fa_words_from_result(
+    result: "ForcedAlignResult",  # Typed FA result (wire-decoded at the proxy)
 ) -> List[FAWord]:  # Word-level alignment results
-    "Run forced alignment on one (segment audio, text) pair -> FA words."
+    "Normalize a typed forced-alignment result into FA words (pure; stage 3)."
+```
+
+``` python
+def build_alignment_composition(
+    seg_list: List[Dict[str, Any]],  # Pipeline-segment entries from the transcription manifest (0.2.0)
+    vad_id: str,               # VAD capability instance id
+    fa_id: str,                # Forced-alignment capability instance id
+    transcribers: List[str],   # Transcriber names to align (manifest `transcripts` keys, stable order)
+    force: bool = False,       # Per-call cache-bypass control flag
+) -> Tuple[Composition, List[Dict[str, Any]]]:  # (composition, per-pseg meta rows)
+    """
+    Build the whole-source M×(VAD ∥ T×FA) composition (D8 fan-in, stage-5 variants).
+    
+    Each pipeline segment contributes one VAD node + one FA node PER TRANSCRIBER
+    with non-empty text — VAD is audio-only (run once; the shared skeleton), FA
+    maps each transcriber's text onto it. All nodes are independent; the host's
+    alignment fold fans them in. Pipeline segments where EVERY transcriber's
+    text is empty are recorded as skipped meta rows and contribute no nodes.
+    
+    Stage 8 (Option C): every node rides the TASK CHANNEL now — VAD on
+    vad/detect_speech, FA on forced_alignment/align — and per-call `force` rides
+    `control` (the adapters own caching). The native-routed path is gone.
+    """
 ```
 
 ``` python
@@ -545,17 +600,19 @@ async def decompose_source(
     queue: JobQueue,
     cfg: DecompConfig,         # Run configuration
     source: Dict[str, Any],    # One source entry from the transcription manifest
-    manifest_path: str,        # Consumed manifest path (for provenance)
     source_index: int,         # Position of this source within the run
-    transcriber_name: str,     # Upstream transcriber capability name
+    transcribers: List[str],   # Transcriber names (manifest order)
+    text_from: str,            # Authoritative transcriber (layer-0 text)
 ) -> Tuple[str, List[DecompSegment]]:  # (source_path, ordered aligned segments)
     """
-    Decompose one source's transcription segments into aligned graph segments.
+    Decompose one source into aligned fine segments with per-transcriber variants.
     
-    Per pipeline segment: re-run VAD on the segment audio (segment-local chunks),
-    force-align the segment text, then build one aligned segment per VAD chunk.
-    Times are offset to source coordinates; indices accumulate across the source's
-    pipeline segments.
+    The VAD-chunk skeleton is computed ONCE per pipeline segment (audio-only);
+    each transcriber's text is forced-aligned onto it independently, then the
+    pure fold merges per chunk: the `text_from` transcriber's alignment becomes
+    the authoritative text, every transcriber's chunk text + char range rides
+    `variants` (slice refs at commit). C4's "same skeleton, different text"
+    duplication is gone — agreement is stored once by construction.
     """
 ```
 
@@ -583,11 +640,32 @@ def confirm_seam(
 ```
 
 ``` python
-def collect_plugin_info(
+def collect_capability_info(
     manager: CapabilityManager,   # Manager holding the loaded capabilities
     instance_ids: List[str],  # Instance ids to record
-) -> Dict[str, Dict[str, Any]]:  # instance_id -> {name, version, db_path}
-    "Record capability identity + data-DB pointers for the run manifest (provenance)."
+) -> Dict[str, Dict[str, Any]]:  # instance_id -> {name, version, db_path, config_hash}
+    """
+    Record capability identity + data-DB pointers for the run manifest (provenance).
+    
+    Stage 5: also records each capability's EFFECTIVE config hash (the same
+    `compute_config_hash` the empirical store keys on) — the VAD config hash is
+    a Segment identity input. `db_path` prefers the effective config over the
+    manifest default (a --graph-db-path override must be what downstream cores
+    resolve; the D19 lesson). Stage 6 (0.2.1): the EFFECTIVE config dict is
+    recorded READABLY beside its hash (the I8 lesson).
+    """
+```
+
+``` python
+def _journal_run_event(
+    """
+    Append a host-tier run event to the journal (CR-14 follow-up).
+    
+    The cores are the trusted host writer class: RUN_STARTED/RUN_FINISHED
+    bracket the run (run manifest <-> journal linkage by run_id) and
+    VERIFY_OUTCOME makes skeptical-lens results durable rows (I14). No-op
+    when the manager has no journal store; append failures stay LOUD.
+    """
 ```
 
 ``` python
@@ -597,12 +675,17 @@ async def run_decomp(
     cfg: DecompConfig,             # Run configuration
     source_manifest_path: str,     # Transcription run manifest to decompose
     run_id: Optional[str] = None,  # Override run id (default: generated)
-) -> DecompManifest:  # Manifest of the documents produced
+    actor: Optional[str] = None,   # Who/what initiated (journal attribution; CLI default cli:<user>)
+) -> DecompManifest:  # Manifest of the sources extended
     """
-    Decompose every source in a transcription run manifest into graph documents.
+    Extend every source in a transcription run manifest with its fine spine.
     
-    Per source: align -> [alignment-review seam] -> build payload ->
-    [commit-review seam] -> commit -> verify. An operator abort at any seam stops
-    the run; the manifest holds the documents committed so far.
+    Stage 5 (decomp-as-extender): the graph ROOT must already exist — decomp
+    recomputes the deterministic root ids from the manifest, verifies the
+    Source node is present (loud error pointing at transcription emission
+    otherwise), aligns per transcriber, and attaches the fine spine under the
+    run's AudioRendition (PART_OF rendition) via the layer's idempotent
+    `extend_graph` (re-runs verify-collide). The fold is declared as a
+    `Derivation` event when segments were actually created.
     """
 ```

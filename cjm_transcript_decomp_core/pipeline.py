@@ -12,7 +12,7 @@ Docs: https://cj-mills.github.io/cjm-transcript-decomp-corepipeline.html.md"""
 
 # %% auto #0
 __all__ = ['logger', 'submit_and_wait', 'load_source_manifest', 'vad_chunks_from_result', 'fa_words_from_result',
-           'build_alignment_composition', 'decompose_source', 'confirm_seam', 'collect_plugin_info', 'run_decomp']
+           'build_alignment_composition', 'decompose_source', 'confirm_seam', 'collect_capability_info', 'run_decomp']
 
 # %% ../nbs/pipeline.ipynb #cbaca039
 import json
@@ -193,7 +193,7 @@ async def decompose_source(
     seg_list = list(source.get("segments") or [])
 
     comp, metas = build_alignment_composition(
-        seg_list, cfg.vad_plugin, cfg.fa_plugin, transcribers, force=cfg.force)
+        seg_list, cfg.vad_capability, cfg.fa_capability, transcribers, force=cfg.force)
     results: Dict[str, Any] = {}
     if comp.nodes:
         comp_id = await queue.submit_composition(comp)
@@ -290,7 +290,7 @@ def confirm_seam(
     return accepted
 
 # %% ../nbs/pipeline.ipynb #399bdc65
-def collect_plugin_info(
+def collect_capability_info(
     manager: CapabilityManager,   # Manager holding the loaded capabilities
     instance_ids: List[str],  # Instance ids to record
 ) -> Dict[str, Dict[str, Any]]:  # instance_id -> {name, version, db_path, config_hash}
@@ -315,7 +315,7 @@ def collect_plugin_info(
             if proxy is not None:
                 current_config = proxy.get_current_config() or {}
         except Exception as e:  # Best-effort: identity recording must not fail the run
-            logger.warning(f"collect_plugin_info: get_current_config({iid}) failed: {e}")
+            logger.warning(f"collect_capability_info: get_current_config({iid}) failed: {e}")
         info[iid] = {
             "name": meta.name,
             "version": getattr(meta, "version", None),
@@ -374,14 +374,14 @@ async def run_decomp(
     _journal_run_event(manager, SubstrateEventType.RUN_STARTED.value, run_id, actor, {
         "core": "cjm-transcript-decomp-core",
         "source_manifest": str(source_manifest_path),
-        "graph_plugin": cfg.graph_plugin,
+        "graph_capability": cfg.graph_capability,
     })
     src = load_source_manifest(source_manifest_path)
     src_cfg = src.get("config", {}) or {}
-    transcribers = list(src_cfg.get("transcriber_plugins") or [])
-    if not transcribers and src_cfg.get("transcriber_plugin"):
+    transcribers = list(src_cfg.get("transcriber_capabilities") or [])
+    if not transcribers and src_cfg.get("transcriber_capability"):
         # pre-0.2.0 manifest: single transcriber under the old key
-        transcribers = [str(src_cfg["transcriber_plugin"])]
+        transcribers = [str(src_cfg["transcriber_capability"])]
     if not transcribers:
         raise RuntimeError("source manifest lists no transcribers")
     text_from = cfg.text_from or (transcribers[0] if len(transcribers) == 1 else None)
@@ -391,28 +391,28 @@ async def run_decomp(
             "(the authoritative transcriber for layer-0 text)")
     if text_from not in transcribers:
         raise RuntimeError(f"--text-from {text_from!r} not among the manifest's transcribers {transcribers}")
-    src_plugins = src.get("plugins", {}) or {}
+    src_capabilities = src.get("capabilities", {}) or {}
 
     manifest = DecompManifest(
         run_id=run_id, created_at=time.time(), config=cfg.to_dict(),
         source_manifest=str(source_manifest_path),
         source_format=src.get("format", ""), source_version=src.get("version", ""),
-        plugins=collect_plugin_info(manager, [cfg.vad_plugin, cfg.fa_plugin, cfg.graph_plugin]),
+        capabilities=collect_capability_info(manager, [cfg.vad_capability, cfg.fa_capability, cfg.graph_capability]),
     )
-    vad_config_hash = str((manifest.plugins.get(cfg.vad_plugin) or {}).get("config_hash") or "")
+    vad_config_hash = str((manifest.capabilities.get(cfg.vad_capability) or {}).get("config_hash") or "")
 
     sources = src.get("sources", []) or []
     status = "completed"
     try:
         for i, source in enumerate(sources):
             # Extender pre-check: the transcription-emitted root must exist.
-            roots = resolve_root_ids(source, src_plugins)
-            root = await graph_task(queue, cfg.graph_plugin, "get_node", node_id=roots["source"])
+            roots = resolve_root_ids(source, src_capabilities)
+            root = await graph_task(queue, cfg.graph_capability, "get_node", node_id=roots["source"])
             if root is None:
                 raise RuntimeError(
                     f"Source root {roots['source']} not found in the graph for "
                     f"{source.get('source_path')!r} — the graph begins at transcription: "
-                    "re-run cjm-transcription-core with --graph-plugin against this DB first")
+                    "re-run cjm-transcription-core with --graph-capability against this DB first")
 
             source_path, aligned = await decompose_source(
                 queue, cfg, source, i, transcribers, text_from)
@@ -428,18 +428,18 @@ async def run_decomp(
                 break
 
             nodes, edges, ids = build_extension_payload(
-                source, src_plugins, vad_config_hash, text_from, aligned)
+                source, src_capabilities, vad_config_hash, text_from, aligned)
 
             if not confirm_seam("commit-review",
                                 [f"{title}: extending Source {ids['source'][:8]}… with "
                                  f"{len(ids['segments'])} segment node(s) + {len(edges)} edge(s) "
-                                 f"via {cfg.graph_plugin}"],
+                                 f"via {cfg.graph_capability}"],
                                 [], assume_yes=cfg.assume_yes):
                 logger.warning(f"run {run_id}: commit declined at source {i} ({source_path})")
                 status = "aborted"
                 break
 
-            res = await extend_graph(queue, cfg.graph_plugin, nodes, edges)
+            res = await extend_graph(queue, cfg.graph_capability, nodes, edges)
             logger.info(f"[src {i}] extension: +{res.nodes_added} node(s) "
                         f"({res.nodes_verified} verified present), +{res.edges_added} edge(s) "
                         f"({res.edges_existing} existing)")
@@ -451,10 +451,10 @@ async def run_decomp(
                                 "text_from": text_from},
                 )
                 dn, de = derivation_to_graph(d)
-                await extend_graph(queue, cfg.graph_plugin, [dn], de)
+                await extend_graph(queue, cfg.graph_capability, [dn], de)
 
             # Fine spine hangs under the run's renditions — verify scopes there.
-            vr = await verify_source(queue, cfg.graph_plugin, ids["source"], ids["renditions"])
+            vr = await verify_source(queue, cfg.graph_capability, ids["source"], ids["renditions"])
             if vr is None:
                 logger.error(f"[src {i}] verify: Source {ids['source']} NOT FOUND in graph")
             else:

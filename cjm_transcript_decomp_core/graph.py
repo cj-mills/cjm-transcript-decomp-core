@@ -44,7 +44,7 @@ from .models import DecompSegment
 # %% ../nbs/graph.ipynb #e22f040d
 def resolve_root_ids(
     source_entry: Dict[str, Any],            # One source entry from the transcription manifest (0.3.0)
-    plugins_info: Dict[str, Dict[str, Any]], # The transcription manifest's plugins block (config hashes)
+    capabilities_info: Dict[str, Dict[str, Any]], # The transcription manifest's capabilities block (config hashes)
 ) -> Dict[str, Any]:  # {"source", "chain", "audio_segments": [{audio_segment, rendition, start, end, model_input_hash, transcripts}]}
     """Recompute the transcription-emitted root node ids from manifest data.
 
@@ -69,7 +69,7 @@ def resolve_root_ids(
         aseg_id = audio_segment_node_id(source_id, start, end)
         rendition_id = audio_rendition_node_id(aseg_id, chain)
         transcripts = {
-            t: transcript_node_id(rendition_id, t, str((plugins_info.get(t) or {}).get("config_hash") or ""))
+            t: transcript_node_id(rendition_id, t, str((capabilities_info.get(t) or {}).get("config_hash") or ""))
             for t in (pseg.get("transcripts") or {})
         }
         asegs.append({"audio_segment": aseg_id, "rendition": rendition_id,
@@ -81,7 +81,7 @@ def resolve_root_ids(
 # %% ../nbs/graph.ipynb #0af0ae04
 def build_extension_payload(
     source_entry: Dict[str, Any],             # One source entry from the transcription manifest
-    plugins_info: Dict[str, Dict[str, Any]],  # The transcription manifest's plugins block
+    capabilities_info: Dict[str, Dict[str, Any]],  # The transcription manifest's capabilities block
     vad_config_hash: str,                     # THIS run's VAD capability config hash (skeleton identity input)
     text_from: str,                           # Authoritative transcriber (layer-0 text designation)
     segments: List[DecompSegment],            # Ordered aligned segments (per-transcriber variants attached)
@@ -97,7 +97,7 @@ def build_extension_payload(
     come from `grouped_spine_edges`: PART_OF to the OWNING AudioRendition,
     STARTS_WITH per rendition, NEXT chained source-wide across coarse boundaries.
     """
-    roots = resolve_root_ids(source_entry, plugins_info)
+    roots = resolve_root_ids(source_entry, capabilities_info)
     source_id = roots["source"]
     asegs = roots["audio_segments"]
 

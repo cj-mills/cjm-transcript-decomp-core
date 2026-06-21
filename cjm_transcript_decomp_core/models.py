@@ -118,9 +118,9 @@ class DecompSegment:
 @dataclass
 class DecompConfig:
     """Configuration for one transcript-decomposition run."""
-    vad_plugin: str = "cjm-capability-silero-vad"                    # VAD capability id
-    fa_plugin: str = "cjm-capability-qwen3-forced-aligner"  # Forced-alignment capability id
-    graph_plugin: str = "cjm-capability-graph-sqlite"                     # Graph-storage capability id
+    vad_capability: str = "cjm-capability-silero-vad"                    # VAD capability id
+    fa_capability: str = "cjm-capability-qwen3-forced-aligner"  # Forced-alignment capability id
+    graph_capability: str = "cjm-capability-graph-sqlite"                     # Graph-storage capability id
     text_from: Optional[str] = None  # Authoritative transcriber for layer-0 text (None: sole transcriber; REQUIRED for multi-transcriber manifests)
     language: str = "English"  # Forced-alignment language
     media_type: str = "audio"  # Source media type
@@ -160,7 +160,7 @@ class DecompManifest:
     source_manifest: str    # Path to the consumed transcription run manifest
     source_format: str = ""  # Upstream manifest format tag (interchange contract)
     source_version: str = ""  # Upstream manifest schema version
-    plugins: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # instance_id -> identity/db_path/config_hash
+    capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # instance_id -> identity/db_path/config_hash
     sources: List[DecompSourceRecord] = field(default_factory=list)   # Extended sources, input order
 
     FORMAT: str = field(default="cjm-transcript-decomp-core/run-manifest", repr=False)  # Format tag
@@ -177,7 +177,7 @@ class DecompManifest:
             "source_manifest": self.source_manifest,
             "source_format": self.source_format,
             "source_version": self.source_version,
-            "plugins": self.plugins,
+            "capabilities": self.capabilities,
             "sources": [s.to_dict() for s in self.sources],
         }
 

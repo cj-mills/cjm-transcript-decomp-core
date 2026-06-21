@@ -35,16 +35,16 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     run = sub.add_parser("run", help="Extend a transcription-emitted graph root with the fine spine")
     run.add_argument("manifest", help="Transcription-core run manifest JSON (the source to decompose)")
     run.add_argument("--manifests-dir", default=".cjm/manifests", help="Capability manifests directory")
-    run.add_argument("--vad-plugin", default="cjm-capability-silero-vad", help="VAD capability name")
-    run.add_argument("--fa-plugin", default="cjm-capability-qwen3-forced-aligner", help="Forced-alignment capability name")
-    run.add_argument("--graph-plugin", default="cjm-capability-graph-sqlite", help="Graph-storage capability name")
+    run.add_argument("--vad-capability", default="cjm-capability-silero-vad", help="VAD capability name")
+    run.add_argument("--fa-capability", default="cjm-capability-qwen3-forced-aligner", help="Forced-alignment capability name")
+    run.add_argument("--graph-capability", default="cjm-capability-graph-sqlite", help="Graph-storage capability name")
     run.add_argument("--graph-db-path", default=None,
                      help="Explicit graph DB path override (F10; scratch-graph loop-backs; default: the capability's configured db_path)")
     run.add_argument("--text-from", default=None,
                      help="Authoritative transcriber for layer-0 text (the ACCURACY model; "
                           "required when the manifest carries multiple transcribers; "
                           "default: the manifest's sole transcriber)")
-    run.add_argument("--sysmon-plugin", default=None, help="MonitorPlugin capability for GPU subtree attribution (CR-7); loaded first; default: no monitor")
+    run.add_argument("--sysmon-capability", default=None, help="monitor capability for GPU subtree attribution (CR-7); loaded first; default: no monitor")
     run.add_argument("--language", default="English", help="Forced-alignment language")
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
     run.add_argument("-y", "--yes", action="store_true", help="Auto-accept HITL seams (headless mode)")
@@ -84,31 +84,31 @@ async def run_command(
         raise SystemExit(f"source manifest not found: {manifest_path}")
 
     cfg = DecompConfig(
-        vad_plugin=args.vad_plugin,
-        fa_plugin=args.fa_plugin,
-        graph_plugin=args.graph_plugin,
+        vad_capability=args.vad_capability,
+        fa_capability=args.fa_capability,
+        graph_capability=args.graph_capability,
         text_from=args.text_from,
         language=args.language,
         force=args.force,
         assume_yes=args.yes,
     )
 
-    # CR-7 GPU subtree attribution is opt-in: --sysmon-plugin threads the monitor
+    # CR-7 GPU subtree attribution is opt-in: --sysmon-capability threads the monitor
     # name into BOTH the manager and the queue; the monitor loads FIRST so GPU
     # capabilities' samples record gpu_memory_mb_peak (voxtral-vllm e2e pattern).
     manager = CapabilityManager(
         search_paths=[Path(args.manifests_dir)],
-        sysmon_capability_name=args.sysmon_plugin,
+        sysmon_capability_name=args.sysmon_capability,
     )
-    instance_ids = [cfg.vad_plugin, cfg.fa_plugin, cfg.graph_plugin]
-    load_order = ([args.sysmon_plugin] if args.sysmon_plugin else []) + instance_ids
+    instance_ids = [cfg.vad_capability, cfg.fa_capability, cfg.graph_capability]
+    load_order = ([args.sysmon_capability] if args.sysmon_capability else []) + instance_ids
     # F10: --graph-db-path threads a caller-wins config into the graph load
     # (the C8 pattern correction-core already used; scratch-graph loop-backs).
-    configs = ({cfg.graph_plugin: {"db_path": args.graph_db_path}}
+    configs = ({cfg.graph_capability: {"db_path": args.graph_db_path}}
                if args.graph_db_path else None)
     load_capabilities(manager, load_order, configs=configs)
 
-    queue = JobQueue(deps=manager, sysmon_capability_name=args.sysmon_plugin)
+    queue = JobQueue(deps=manager, sysmon_capability_name=args.sysmon_capability)
     await queue.start()
     try:
         # CR-14 follow-up: actor attribution (operator identity by default;

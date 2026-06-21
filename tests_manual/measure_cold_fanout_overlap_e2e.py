@@ -11,7 +11,7 @@ per-lane overlap from in-process Job records:
   - VAD ∥ FA cross-instance co-run (the lane overlap admission permits)
 
 Fresh sources make every VAD + FA call cold by content (no --force games).
-Inspect `.cjm/plugin_configs.db` for leftover persisted configs BEFORE any
+Inspect `.cjm/capability_configs.db` for leftover persisted configs BEFORE any
 cold run (the I8 lesson).
 
 As-measured baseline (2026-06-11, RTX 4090, HH1+HH2 = 12 segments x 2
@@ -44,7 +44,7 @@ TEXT_FROM = "cjm-capability-voxtral-hf"  # accuracy authority
 def lane_intervals(jobs, instance_id):
     """(start, end) UTC intervals for completed jobs of one instance."""
     return sorted((j.started_at, j.completed_at) for j in jobs
-                  if j.plugin_instance_id == instance_id and j.started_at and j.completed_at)
+                  if j.capability_instance_id == instance_id and j.started_at and j.completed_at)
 
 
 def merge(iv):
@@ -98,7 +98,7 @@ async def main():
         raise SystemExit("usage: measure_cold_fanout_overlap_e2e.py <transcription-manifest.json>")
     manifest_path = str(Path(sys.argv[1]).resolve())
     cfg = DecompConfig(
-        vad_plugin=VAD, fa_plugin=FA, graph_plugin=GRAPH,
+        vad_capability=VAD, fa_capability=FA, graph_capability=GRAPH,
         text_from=TEXT_FROM, language="English",
         force=False,  # fresh sources are cold by content
         assume_yes=True,

@@ -31,7 +31,7 @@ unreachable) and the test-sys-mon missing-fastcore K3 replay — both via
 the new `cjm-ctl logs --chunks` death rattle.
 
 I8 note: this run is pure cache-hit + default configs — no persisted-config
-mutation (plugin_configs.db inspected empty at kickoff).
+mutation (capability_configs.db inspected empty at kickoff).
 """
 import json
 import sqlite3
@@ -100,7 +100,7 @@ def main() -> None:
          "run", str(SN1_MANIFEST),
          "--text-from", "cjm-capability-whisper",
          "--graph-db-path", str(SCRATCH_DB),
-         "--sysmon-plugin", "cjm-capability-monitor-nvidia",
+         "--sysmon-capability", "cjm-capability-monitor-nvidia",
          "--actor", ACTOR,
          "--output", str(DECOMP_OUT), "--yes"],
         cwd=DECOMP, capture_output=True, text=True)

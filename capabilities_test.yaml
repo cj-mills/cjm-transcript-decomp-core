@@ -11,7 +11,7 @@ capabilities:
     # Environment File
     env_file: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-capability-monitor-nvidia/environment.yml"
 
-    # The Plugin Package (local source)
+    # The Capability Package (local source)
     package: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-capability-monitor-nvidia/"
 
     # Interface Libraries
@@ -33,7 +33,7 @@ capabilities:
     # Environment File
     env_file: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-capability-silero-vad/environment.yml"
 
-    # The Plugin Package (local source)
+    # The Capability Package (local source)
     package: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-capability-silero-vad/"
 
     # Interface Libraries (schema v2: substrate AUTO-INJECTED; the tool depends
@@ -59,7 +59,7 @@ capabilities:
     # Environment File (System Deps)
     env_file: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-capability-qwen3-forced-aligner/environment.yml"
 
-    # The Plugin Package (local source)
+    # The Capability Package (local source)
     package: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-capability-qwen3-forced-aligner/"
 
     # Interface Libraries (schema v2: substrate AUTO-INJECTED; the tool depends
@@ -83,7 +83,7 @@ capabilities:
     # Environment File
     env_file: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-capability-graph-sqlite/environment.yml"
 
-    # The Plugin Package (local source)
+    # The Capability Package (local source)
     package: "/mnt/SN850X_8TB_EXT4/Projects/GitHub/cj-mills/cjm-capability-graph-sqlite/"
 
     # Interface Libraries (schema v2: substrate AUTO-INJECTED; the tool depends
