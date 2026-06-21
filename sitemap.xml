@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://cj-mills.github.io/cjm-transcript-decomp-core/index.html</loc>
+    <lastmod>2026-06-21T05:24:11.479Z</lastmod>
+  </url>
+  <url>
+    <loc>https://cj-mills.github.io/cjm-transcript-decomp-core/models.html</loc>
+    <lastmod>2026-06-21T05:24:11.552Z</lastmod>
+  </url>
+  <url>
+    <loc>https://cj-mills.github.io/cjm-transcript-decomp-core/cli.html</loc>
+    <lastmod>2026-06-21T05:24:11.440Z</lastmod>
+  </url>
+  <url>
+    <loc>https://cj-mills.github.io/cjm-transcript-decomp-core/graph.html</loc>
+    <lastmod>2026-06-21T05:24:11.444Z</lastmod>
+  </url>
+  <url>
+    <loc>https://cj-mills.github.io/cjm-transcript-decomp-core/alignment.html</loc>
+    <lastmod>2026-06-21T05:24:11.264Z</lastmod>
+  </url>
+  <url>
+    <loc>https://cj-mills.github.io/cjm-transcript-decomp-core/pipeline.html</loc>
+    <lastmod>2026-06-21T05:24:11.613Z</lastmod>
+  </url>
+</urlset>
