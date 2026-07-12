@@ -1,9 +1,0 @@
-project:
-  output-dir: _docs
-
-website:
-  title: "cjm-transcript-decomp-core"
-  site-url: "https://cj-mills.github.io/cjm-transcript-decomp-core"
-  description: "A frontend-agnostic core for the transcript decomposition workflow — composes isolated capability workers (forced alignment, VAD, graph storage) into a headless pipeline that decomposes transcription run manifests into a VAD-aligned context-graph spine with traceable provenance, and a CLI as its first driver."
-  repo-branch: main
-  repo-url: "https://github.com/cj-mills/cjm-transcript-decomp-core"
