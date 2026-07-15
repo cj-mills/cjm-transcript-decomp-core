@@ -10,7 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from cjm_capability_primitives.forced_alignment import ForcedAlignResult
 from cjm_capability_primitives.vad import VADResult
 from cjm_context_graph_layer.declare import Derivation, derivation_to_graph
-from cjm_context_graph_layer.ops import extend_graph, graph_task
+from cjm_context_graph_layer.journal import journal_extend, sidecar_journal_path
+from cjm_context_graph_layer.ops import graph_task
 from cjm_substrate.core.empirical_store import compute_config_hash
 from cjm_substrate.core.journal_store import JournalEvent, SubstrateEventType
 from cjm_substrate.core.manager import CapabilityManager
@@ -380,6 +381,10 @@ async def run_decomp(
         capabilities=collect_capability_info(manager, [cfg.vad_capability, cfg.fa_capability, cfg.graph_capability]),
     )
     vad_config_hash = str((manifest.capabilities.get(cfg.vad_capability) or {}).get("config_hash") or "")
+    # Pipeline writes append through to the graph db's SIDECAR journal (DEC ccbab9f5 /
+    # finding 4219da27): unjournaled ingestion would erode db-rebuildability.
+    graph_db_path = (manifest.capabilities.get(cfg.graph_capability) or {}).get("db_path")
+    graph_journal_path = sidecar_journal_path(str(graph_db_path)) if graph_db_path else None
 
     sources = src.get("sources", []) or []
     status = "completed"
@@ -419,7 +424,12 @@ async def run_decomp(
                 status = "aborted"
                 break
 
-            res = await extend_graph(queue, cfg.graph_capability, nodes, edges)
+            res = await journal_extend(queue, cfg.graph_capability, nodes, edges,
+                                       journal_path=graph_journal_path, verb="spine-extension",
+                                       actor="pipeline:cjm-transcript-decomp-core", run=run_id,
+                                       args={"source_id": ids["source"],
+                                             "segments": len(ids["segments"]),
+                                             "text_from": text_from})
             logger.info(f"[src {i}] extension: +{res.nodes_added} node(s) "
                         f"({res.nodes_verified} verified present), +{res.edges_added} edge(s) "
                         f"({res.edges_existing} existing)")
@@ -431,7 +441,10 @@ async def run_decomp(
                                 "text_from": text_from},
                 )
                 dn, de = derivation_to_graph(d)
-                await extend_graph(queue, cfg.graph_capability, [dn], de)
+                await journal_extend(queue, cfg.graph_capability, [dn], de,
+                                     journal_path=graph_journal_path, verb="derivation",
+                                     actor="pipeline:cjm-transcript-decomp-core", run=run_id,
+                                     args={"method": "alignment-fold/v1"})
 
             # Fine spine hangs under the run's renditions — verify scopes there.
             vr = await verify_source(queue, cfg.graph_capability, ids["source"], ids["renditions"])
