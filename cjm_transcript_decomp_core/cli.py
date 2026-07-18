@@ -59,7 +59,10 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     run.add_argument("--language", default="English", help="Forced-alignment language")
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
     run.add_argument("-y", "--yes", action="store_true", help="Auto-accept HITL seams (headless mode)")
-    run.add_argument("--output", default=None, help="Decomp-manifest output path (single-manifest runs only; default: runs/<run_id>.json)")
+    run.add_argument("--output", default=None, help="Decomp-manifest output path (single-manifest runs only; default: <output-dir>/<run_id>.json)")
+    run.add_argument("--output-dir", default="runs",
+                     help="Decomp-manifest output directory (callers with a shared runs dir "
+                          "pass it so manifests land beside their sources; default: runs/ under the cwd)")
     run.add_argument("--actor", default=None,
                      help="Journal attribution for who/what initiated this run (default: cli:<username>)")
     run.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging")
@@ -147,7 +150,8 @@ async def run_command(
                 print(f"FAILED {mp}: {e}")
                 all_ok = False
                 continue
-            out = Path(args.output) if args.output else Path("runs") / f"{manifest.run_id}.json"
+            out = (Path(args.output) if args.output
+                   else Path(args.output_dir) / f"{manifest.run_id}.json")
             manifest.save(out)
             n_manifest_sources = len(load_source_manifest(mp).get("sources", []) or [])
             n_sources = len(manifest.sources)
