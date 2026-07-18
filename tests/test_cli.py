@@ -8,7 +8,7 @@ def test_run_defaults():
     p = build_parser()
     args = p.parse_args(["run", "m.json", "--yes", "--language", "English"])
     assert args.command == "run"
-    assert args.manifest == "m.json"
+    assert args.manifests == ["m.json"]  # single manifest = a batch of one
     assert args.yes is True
     assert args.fa_capability == "cjm-capability-qwen3-forced-aligner"
     assert args.graph_capability == "cjm-capability-graph-sqlite"
@@ -22,3 +22,12 @@ def test_text_from_and_sysmon_flags():
                          "--sysmon-capability", "cjm-capability-monitor-nvidia"])
     assert args.text_from == "cjm-capability-voxtral-hf"
     assert args.sysmon_capability == "cjm-capability-monitor-nvidia"
+
+
+def test_batch_manifests():
+    # Batch shape (work item 0ff6bf0f): N manifests, one invocation, one stack.
+    p = build_parser()
+    args = p.parse_args(["run", "a.json", "b.json", "c.json", "--yes",
+                         "--text-from", "cjm-capability-voxtral-hf"])
+    assert args.manifests == ["a.json", "b.json", "c.json"]
+    assert args.text_from == "cjm-capability-voxtral-hf"

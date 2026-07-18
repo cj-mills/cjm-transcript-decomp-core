@@ -10,9 +10,11 @@ Prerequisite runtime (once, from the repo root):
     cjm-ctl --cjm-config cjm.yaml setup-runtime
     cjm-ctl --cjm-config cjm.yaml install-all --capabilities capabilities_test.yaml --force
 
-Then decompose a transcription-core run manifest:
+Then decompose transcription-core run manifest(s) — a multi-manifest batch
+shares ONE loaded capability stack (models load once, per-manifest runs):
 
     cjm-transcript-decomp-core run path/to/transcription-run.json --yes
+    cjm-transcript-decomp-core run runs/run_a.json runs/run_b.json --yes
     # GPU runs: opt into CR-7 GPU subtree attribution
     cjm-transcript-decomp-core run run.json --yes --sysmon-capability cjm-capability-monitor-nvidia
 """
@@ -41,7 +43,8 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     sub = parser.add_subparsers(dest="command", required=True)
 
     run = sub.add_parser("run", help="Extend a transcription-emitted graph root with the fine spine")
-    run.add_argument("manifest", help="Transcription-core run manifest JSON (the source to decompose)")
+    run.add_argument("manifests", nargs="+",
+                     help="Transcription-core run manifest JSON(s) — a batch shares ONE loaded capability stack")
     run.add_argument("--manifests-dir", default=".cjm/manifests", help="Capability manifests directory")
     run.add_argument("--vad-capability", default="cjm-capability-silero-vad", help="VAD capability name")
     run.add_argument("--fa-capability", default="cjm-capability-qwen3-forced-aligner", help="Forced-alignment capability name")
@@ -56,7 +59,7 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     run.add_argument("--language", default="English", help="Forced-alignment language")
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
     run.add_argument("-y", "--yes", action="store_true", help="Auto-accept HITL seams (headless mode)")
-    run.add_argument("--output", default=None, help="Decomp-manifest output path (default: runs/<run_id>.json)")
+    run.add_argument("--output", default=None, help="Decomp-manifest output path (single-manifest runs only; default: runs/<run_id>.json)")
     run.add_argument("--actor", default=None,
                      help="Journal attribution for who/what initiated this run (default: cli:<username>)")
     run.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging")
@@ -85,11 +88,24 @@ def load_capabilities(
 
 async def run_command(
     args: argparse.Namespace,  # Parsed CLI arguments for the `run` subcommand
-) -> int:  # Process exit code (0 = all sources extended + verified)
-    """Execute the `run` subcommand: extend a transcription-emitted root with the fine spine."""
-    manifest_path = str(Path(args.manifest).resolve())
-    if not Path(manifest_path).exists():
-        raise SystemExit(f"source manifest not found: {manifest_path}")
+) -> int:  # Process exit code (0 = every manifest fully extended + verified)
+    """Execute the `run` subcommand: extend transcription-run manifest(s) with the fine spine.
+
+    Batch shape (decomp-TUI demand, work item 0ff6bf0f): N manifests ride ONE
+    capability stack — the models load once and every manifest reuses them,
+    where N CLI invocations would pay N model loads. Each manifest keeps its
+    own run_id, decomp manifest, and RUN_STARTED/RUN_FINISHED journal bracket,
+    so a batch member is indistinguishable from a solo run downstream. A failed
+    member records and the batch continues (unattended queueing must not sink
+    the rest); the exit code aggregates across members.
+    """
+    manifest_paths = [str(Path(m).resolve()) for m in args.manifests]
+    missing = [m for m in manifest_paths if not Path(m).exists()]
+    if missing:
+        raise SystemExit(f"source manifest(s) not found: {', '.join(missing)}")
+    if args.output and len(manifest_paths) > 1:
+        raise SystemExit("--output names ONE decomp manifest — omit it for batch runs "
+                         "(each lands at runs/<run_id>.json)")
 
     cfg = DecompConfig(
         vad_capability=args.vad_capability,
@@ -118,11 +134,27 @@ async def run_command(
 
     queue = JobQueue(deps=manager, sysmon_capability_name=args.sysmon_capability)
     await queue.start()
+    all_ok = True
     try:
         # CR-14 follow-up: actor attribution (operator identity by default;
         # agents/services pass --actor explicitly).
         actor = args.actor or f"cli:{getpass.getuser()}"
-        manifest = await run_decomp(manager, queue, cfg, manifest_path, actor=actor)
+        for mp in manifest_paths:
+            try:
+                manifest = await run_decomp(manager, queue, cfg, mp, actor=actor)
+            except Exception as e:  # One member's failure must not sink the batch
+                logger.error(f"decomp failed for {mp}: {e}")
+                print(f"FAILED {mp}: {e}")
+                all_ok = False
+                continue
+            out = Path(args.output) if args.output else Path("runs") / f"{manifest.run_id}.json"
+            manifest.save(out)
+            n_manifest_sources = len(load_source_manifest(mp).get("sources", []) or [])
+            n_sources = len(manifest.sources)
+            n_segs = sum(s.segment_count for s in manifest.sources)
+            print(f"decomp manifest: {out}")
+            print(f"sources extended: {n_sources}/{n_manifest_sources}  segment nodes: {n_segs}")
+            all_ok = all_ok and (n_sources == n_manifest_sources)
     finally:
         await queue.stop()
         for iid in reversed(load_order):  # Reverse load order; the monitor unloads last
@@ -130,15 +162,7 @@ async def run_command(
                 manager.unload_capability(iid)
             except Exception as e:  # Best-effort teardown; never mask the run's outcome
                 logger.warning(f"unload {iid} failed: {e}")
-
-    out = Path(args.output) if args.output else Path("runs") / f"{manifest.run_id}.json"
-    manifest.save(out)
-    n_manifest_sources = len(load_source_manifest(manifest_path).get("sources", []) or [])
-    n_sources = len(manifest.sources)
-    n_segs = sum(s.segment_count for s in manifest.sources)
-    print(f"decomp manifest: {out}")
-    print(f"sources extended: {n_sources}/{n_manifest_sources}  segment nodes: {n_segs}")
-    return 0 if n_sources == n_manifest_sources else 1
+    return 0 if all_ok else 1
 
 
 def main(
