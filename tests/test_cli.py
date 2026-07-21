@@ -14,7 +14,10 @@ def test_run_defaults():
     assert args.graph_capability == "cjm-capability-graph-sqlite"
     assert args.text_from is None  # authority defaults to the manifest's sole transcriber
     assert args.sysmon_capability is None
-    assert args.output_dir == "runs"  # cwd-relative default; TUIs pin their browsed dir
+    # 5daadfc4: None sentinel — run_command resolves the workspace's runs/ when
+    # one is active, else the legacy cwd-relative runs/; TUIs pin their browsed dir
+    assert args.output_dir is None
+    assert args.workspace is None
 
 
 def test_text_from_and_sysmon_flags():

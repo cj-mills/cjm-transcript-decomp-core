@@ -17,6 +17,7 @@ from cjm_substrate.core.journal_store import JournalEvent, SubstrateEventType
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate.core.ports import Composition, CompositionNode, NodeState
 from cjm_substrate.core.queue import JobQueue, JobStatus
+from cjm_substrate.core.workspace import resolve_recorded_tree
 from cjm_transcript_decomp_core.alignment import (assign_words_to_chunks,
                                                   build_segments_from_alignment,
                                                   map_fa_words_to_text, tier1_alignment_checks)
@@ -59,8 +60,11 @@ def load_source_manifest(
 
     Consumed as untyped JSON — the format/version tags are the only interchange
     contract (no shared schema type across cores; manifest-as-interchange, CR-20).
+    ${WS}/ recorded paths (5daadfc4 rung f) resolve to absolute here, anchored
+    at the manifest's own location (active workspace as fallback), so all
+    downstream consumers keep seeing absolute paths.
     """
-    data = json.loads(Path(path).read_text())
+    data = resolve_recorded_tree(json.loads(Path(path).read_text()), Path(path))
     fmt = data.get("format", "")
     if "transcription-core" not in fmt:
         logger.warning(f"unexpected source manifest format: {fmt!r} (continuing)")

@@ -23,11 +23,13 @@ import argparse
 import asyncio
 import getpass
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate.core.queue import JobQueue
+from cjm_substrate.core.workspace import resolve_workspace
 from cjm_transcript_decomp_core.models import DecompConfig
 from cjm_transcript_decomp_core.pipeline import load_source_manifest, run_decomp
 
@@ -60,9 +62,14 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
     run.add_argument("-y", "--yes", action="store_true", help="Auto-accept HITL seams (headless mode)")
     run.add_argument("--output", default=None, help="Decomp-manifest output path (single-manifest runs only; default: <output-dir>/<run_id>.json)")
-    run.add_argument("--output-dir", default="runs",
+    run.add_argument("--output-dir", default=None,
                      help="Decomp-manifest output directory (callers with a shared runs dir "
-                          "pass it so manifests land beside their sources; default: runs/ under the cwd)")
+                          "pass it so manifests land beside their sources; default: the "
+                          "workspace's runs/ when one is active, else runs/ under the cwd)")
+    run.add_argument("--workspace", default=None,
+                     help="Workspace root (5daadfc4; default: CJM_WORKSPACE env, else upward walk "
+                          "from cwd). Supplies the --output-dir default and is exported so "
+                          "substrate config + capability workers resolve workspace-scoped paths")
     run.add_argument("--actor", default=None,
                      help="Journal attribution for who/what initiated this run (default: cli:<username>)")
     run.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging")
@@ -102,6 +109,13 @@ async def run_command(
     member records and the batch continues (unattended queueing must not sink
     the rest); the exit code aggregates across members.
     """
+    # 5daadfc4 workspace: resolve BEFORE any substrate config loads; export so
+    # the process tree (substrate config, capability workers) is workspace-scoped.
+    ws = resolve_workspace(explicit=getattr(args, "workspace", None))
+    if ws is not None:
+        os.environ["CJM_WORKSPACE"] = str(ws.root)
+    output_dir = (Path(args.output_dir) if args.output_dir
+                  else (ws.runs_dir if ws is not None else Path("runs")))
     manifest_paths = [str(Path(m).resolve()) for m in args.manifests]
     missing = [m for m in manifest_paths if not Path(m).exists()]
     if missing:
@@ -151,8 +165,8 @@ async def run_command(
                 all_ok = False
                 continue
             out = (Path(args.output) if args.output
-                   else Path(args.output_dir) / f"{manifest.run_id}.json")
-            manifest.save(out)
+                   else output_dir / f"{manifest.run_id}.json")
+            manifest.save(out, workspace=ws)
             n_manifest_sources = len(load_source_manifest(mp).get("sources", []) or [])
             n_sources = len(manifest.sources)
             n_segs = sum(s.segment_count for s in manifest.sources)
