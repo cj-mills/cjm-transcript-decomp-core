@@ -26,7 +26,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `build_parser` _function_ — Build the CLI parser (subcommands: run).
 - `load_capabilities` _function_ — Discover manifests + load each requested capability (default instance).
 - `main` _function_ — CLI entry point (console script: `cjm-transcript-decomp-core`).
-- `run_command` _function_ — Execute the `run` subcommand: extend a transcription-emitted root with the fine spine.
+- `run_command` _function_ — Execute the `run` subcommand: extend transcription-run manifest(s) with the fine spine.
 
 ### `cjm_transcript_decomp_core.graph`
 
@@ -52,6 +52,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `build_alignment_composition` _function_ — Build the whole-source M×(VAD ∥ T×FA) composition (D8 fan-in, stage-5 variants).
 - `collect_capability_info` _function_ — Record capability identity + data-DB pointers for the run manifest (provenance).
 - `confirm_seam` _function_ — HITL approval seam in its cheapest viable form (log + optional CLI prompt).
+- `decomp_replay_handlers` _function_ — The decomp core's replay vocabulary (DEC 426658f1, replay stays DOMAIN-OWNED).
 - `decompose_source` _function_ — Decompose one source into aligned fine segments with per-transcriber variants.
 - `fa_words_from_result` _function_ — Normalize a typed forced-alignment result into FA words (pure; stage 3).
 - `load_source_manifest` _function_ — Load + lightly validate a transcription-core run manifest.
@@ -62,3 +63,4 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 ## Dependencies
 
 **Depends on:** `cjm-capability-primitives`, `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-substrate`, `cjm-transcript-graph-schema`
+**Used by:** `cjm-transcript-decomp-tui`

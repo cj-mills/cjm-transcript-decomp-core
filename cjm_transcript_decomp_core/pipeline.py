@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from cjm_capability_primitives.forced_alignment import ForcedAlignResult
 from cjm_capability_primitives.vad import VADResult
 from cjm_context_graph_layer.declare import Derivation, derivation_to_graph
-from cjm_context_graph_layer.journal import journal_extend, sidecar_journal_path
+from cjm_context_graph_layer.journal import journal_extend, sidecar_journal_path, wires_handlers
 from cjm_context_graph_layer.ops import graph_task
 from cjm_substrate.core.empirical_store import compute_config_hash
 from cjm_substrate.core.journal_store import JournalEvent, SubstrateEventType
@@ -490,3 +490,14 @@ async def run_decomp(
         "segments": sum(s.segment_count for s in manifest.sources),
     })
     return manifest
+
+
+def decomp_replay_handlers() -> Dict[str, Any]:  # verb -> async handler(queue, graph_id, op)
+    """The decomp core's replay vocabulary (DEC 426658f1, replay stays DOMAIN-OWNED).
+
+    Exported through the `cjm_context_graph_layer.replay` entry-point group and
+    unioned by `composed_replay_handlers`. Both verbs are `journal_extend` ops —
+    wire-carrying by construction — so they register the layer's shared
+    `apply_wires` (identity-comparable across cores: transcription also emits
+    `derivation`, and the shared handler keeps that collision legal)."""
+    return wires_handlers("spine-extension", "derivation")
