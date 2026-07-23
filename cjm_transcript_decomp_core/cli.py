@@ -59,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                           "default: the manifest's sole transcriber)")
     run.add_argument("--sysmon-capability", default=None, help="monitor capability for GPU subtree attribution (CR-7); loaded first; default: no monitor")
     run.add_argument("--language", default="English", help="Forced-alignment language")
+    run.add_argument("--sentence-split", action="store_true",
+                     help="Run the post-FA sentence-split stage (DEC f1024568): chunks whose "
+                          "text crosses a sentence end split at the FA word gap; commits a "
+                          "PARALLEL spine (new skeleton hash) — existing spines are untouched")
+    run.add_argument("--split-min-chunk-s", type=float, default=0.5,
+                     help="Sentence-split min sub-chunk duration guard, seconds (identity input)")
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
     run.add_argument("-y", "--yes", action="store_true", help="Auto-accept HITL seams (headless mode)")
     run.add_argument("--output", default=None, help="Decomp-manifest output path (single-manifest runs only; default: <output-dir>/<run_id>.json)")
@@ -132,6 +138,8 @@ async def run_command(
         language=args.language,
         force=args.force,
         assume_yes=args.yes,
+        sentence_split=args.sentence_split,
+        split_min_chunk_s=args.split_min_chunk_s,
     )
 
     # CR-7 GPU subtree attribution is opt-in: --sysmon-capability threads the monitor

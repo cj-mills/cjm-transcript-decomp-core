@@ -117,6 +117,8 @@ class DecompConfig:
     media_type: str = "audio"  # Source media type
     force: bool = False        # Bypass capability-side caches (VAD + FA)
     assume_yes: bool = False   # Auto-accept HITL seams (headless mode)
+    sentence_split: bool = False    # Run the post-FA sentence-split stage (DEC f1024568; parallel spine)
+    split_min_chunk_s: float = 0.5  # Sentence-split min sub-chunk duration guard (seconds)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict snapshot for the manifest
         """Serialize to a plain dict."""
@@ -153,9 +155,11 @@ class DecompManifest:
     source_version: str = ""  # Upstream manifest schema version
     capabilities: Dict[str, Dict[str, Any]] = field(default_factory=dict)  # instance_id -> identity/db_path/config_hash
     sources: List[DecompSourceRecord] = field(default_factory=list)   # Extended sources, input order
+    skeleton_config_hash: str = ""      # Segment identity input (0.2.2): VAD config hash, or the composite when a split stage ran
+    split_policy: Optional[str] = None  # Split policy+version that refined this run's skeleton (None = raw VAD)
 
     FORMAT: str = field(default="cjm-transcript-decomp-core/run-manifest", repr=False)  # Format tag
-    VERSION: str = field(default="0.2.1", repr=False)                                   # Schema version
+    VERSION: str = field(default="0.2.2", repr=False)                                   # Schema version
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form for JSON serialization
         """Serialize to a plain dict with nested sources."""
@@ -169,6 +173,8 @@ class DecompManifest:
             "source_format": self.source_format,
             "source_version": self.source_version,
             "capabilities": self.capabilities,
+            "skeleton_config_hash": self.skeleton_config_hash,
+            "split_policy": self.split_policy,
             "sources": [s.to_dict() for s in self.sources],
         }
 

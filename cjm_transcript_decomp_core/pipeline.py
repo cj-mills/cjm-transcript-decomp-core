@@ -20,7 +20,9 @@ from cjm_substrate.core.queue import JobQueue, JobStatus
 from cjm_substrate.core.workspace import resolve_recorded_tree
 from cjm_transcript_decomp_core.alignment import (assign_words_to_chunks,
                                                   build_segments_from_alignment,
-                                                  map_fa_words_to_text, tier1_alignment_checks)
+                                                  map_fa_words_to_text, SENTENCE_SPLIT_POLICY,
+                                                  split_chunks_at_sentence_gaps,
+                                                  tier1_alignment_checks)
 from cjm_transcript_decomp_core.graph import (build_extension_payload, resolve_root_ids,
                                               verify_source)
 from cjm_transcript_decomp_core.models import (DecompConfig, DecompManifest, DecompSegment,
@@ -200,15 +202,33 @@ async def decompose_source(
             continue
         vad_chunks = vad_chunks_from_result(results[m["vad_node"]])
 
+        # Normalize each transcriber's FA output once (words + char spans).
+        per_t_words: Dict[str, List[FAWord]] = {}
+        per_t_spans: Dict[str, List[Tuple[int, int]]] = {}
+        for t, fa_n in m["fa_nodes"].items():
+            per_t_words[t] = fa_words_from_result(results[fa_n])
+            per_t_spans[t] = map_fa_words_to_text(m["texts"][t], per_t_words[t])
+
+        # Sentence-split stage (DEC f1024568): refine the shared skeleton at the
+        # AUTHORITATIVE transcriber's sentence-gap words BEFORE any fold — every
+        # transcriber re-folds over the same refined skeleton, so variants stay
+        # per-chunk consistent by construction. Chunks the authoritative
+        # transcriber has no words for (montage/textless) pass through whole.
+        if cfg.sentence_split and text_from in per_t_words:
+            n_before = len(vad_chunks)
+            vad_chunks = split_chunks_at_sentence_gaps(
+                vad_chunks, per_t_words[text_from], per_t_spans[text_from],
+                m["texts"][text_from], min_chunk_s=cfg.split_min_chunk_s)
+            if len(vad_chunks) != n_before:
+                logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s: "
+                            f"sentence-split {n_before} -> {len(vad_chunks)} chunk(s)")
+
         # Per-transcriber fold over the SHARED skeleton.
         per_t_segments: Dict[str, List[Any]] = {}
-        for t, fa_n in m["fa_nodes"].items():
-            text = m["texts"][t]
-            fa_words = fa_words_from_result(results[fa_n])
-            spans = map_fa_words_to_text(text, fa_words)
-            assignments = assign_words_to_chunks(fa_words, vad_chunks)
+        for t in m["fa_nodes"]:
             per_t_segments[t] = build_segments_from_alignment(
-                text=text, spans=spans, assignments=assignments,
+                text=m["texts"][t], spans=per_t_spans[t],
+                assignments=assign_words_to_chunks(per_t_words[t], vad_chunks),
                 num_chunks=len(vad_chunks), source_provider_id=t,
             )
         auth = per_t_segments.get(text_from)
@@ -385,6 +405,21 @@ async def run_decomp(
         capabilities=collect_capability_info(manager, [cfg.vad_capability, cfg.fa_capability, cfg.graph_capability]),
     )
     vad_config_hash = str((manifest.capabilities.get(cfg.vad_capability) or {}).get("config_hash") or "")
+    # Skeleton identity (DEC f1024568): the Segment identity input WIDENS to a
+    # skeleton-config hash — the raw VAD hash when no split stage runs (legacy-
+    # identical ids), a composite over {vad config hash, split policy + params}
+    # when sentence-split is on, so split spines COEXIST with the originals by
+    # construction (no node id is shared across skeletons).
+    split_policy = SENTENCE_SPLIT_POLICY if cfg.sentence_split else None
+    skeleton_config_hash = vad_config_hash
+    if split_policy:
+        skeleton_config_hash = compute_config_hash({
+            "vad_config_hash": vad_config_hash,
+            "split_policy": split_policy,
+            "split_min_chunk_s": cfg.split_min_chunk_s,
+        })
+    manifest.skeleton_config_hash = skeleton_config_hash
+    manifest.split_policy = split_policy
     # Pipeline writes append through to the graph db's SIDECAR journal (DEC ccbab9f5 /
     # finding 4219da27): unjournaled ingestion would erode db-rebuildability.
     graph_db_path = (manifest.capabilities.get(cfg.graph_capability) or {}).get("db_path")
@@ -417,7 +452,8 @@ async def run_decomp(
                 break
 
             nodes, edges, ids = build_extension_payload(
-                source, src_capabilities, vad_config_hash, text_from, aligned)
+                source, src_capabilities, skeleton_config_hash, text_from, aligned,
+                split_policy=split_policy)
 
             if not confirm_seam("commit-review",
                                 [f"{title}: extending Source {ids['source'][:8]}… with "
@@ -450,8 +486,11 @@ async def run_decomp(
                                      actor="pipeline:cjm-transcript-decomp-core", run=run_id,
                                      args={"method": "alignment-fold/v1"})
 
-            # Fine spine hangs under the run's renditions — verify scopes there.
-            vr = await verify_source(queue, cfg.graph_capability, ids["source"], ids["renditions"])
+            # Fine spine hangs under the run's renditions — verify scopes there,
+            # id-scoped to THIS run's segments (a coexisting sibling spine under
+            # the same renditions must not fail the structural checks).
+            vr = await verify_source(queue, cfg.graph_capability, ids["source"],
+                                     ids["renditions"], segment_ids=ids["segments"])
             if vr is None:
                 logger.error(f"[src {i}] verify: Source {ids['source']} NOT FOUND in graph")
             else:

@@ -106,3 +106,20 @@ def test_provenance_refs_and_text_from():
     n2 = nodes[2]
     assert len(n2["sources"]) == 1 and "text_from" not in n2["properties"]
     assert n2["properties"]["text"] == ""
+
+
+def test_parallel_spines_disjoint_ids_and_split_metadata():
+    # DEC f1024568: a split run passes a DIFFERENT skeleton hash — every node id
+    # forks, so the split spine coexists with the original by construction.
+    base_nodes, _, base_ids = build_extension_payload(
+        SOURCE_ENTRY, CAPABILITIES, "sha256:vad", "voxtral", _segments())
+    split_nodes, _, split_ids = build_extension_payload(
+        SOURCE_ENTRY, CAPABILITIES, "sha256:skel-split", "voxtral", _segments(),
+        split_policy="sentence-split/v1")
+    assert set(base_ids["segments"]).isdisjoint(split_ids["segments"])
+    # The identity input rides every node as the queryable skeleton_hash prop;
+    # split runs also record their policy tag (base runs carry no split_policy).
+    assert all(n["properties"]["skeleton_hash"] == "sha256:vad" for n in base_nodes)
+    assert all("split_policy" not in n["properties"] for n in base_nodes)
+    assert all(n["properties"]["skeleton_hash"] == "sha256:skel-split" for n in split_nodes)
+    assert all(n["properties"]["split_policy"] == "sentence-split/v1" for n in split_nodes)

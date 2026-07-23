@@ -66,9 +66,10 @@ def resolve_root_ids(
 def build_extension_payload(
     source_entry: Dict[str, Any],             # One source entry from the transcription manifest
     capabilities_info: Dict[str, Dict[str, Any]],  # The transcription manifest's capabilities block
-    vad_config_hash: str,                     # THIS run's VAD capability config hash (skeleton identity input)
+    skeleton_config_hash: str,                # THIS run's skeleton-config hash (Segment identity input; = the VAD config hash when no split stage ran)
     text_from: str,                           # Authoritative transcriber (layer-0 text designation)
     segments: List[DecompSegment],            # Ordered aligned segments (per-transcriber variants attached)
+    split_policy: Optional[str] = None,       # Split policy+version that refined the skeleton (node metadata, never identity)
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:  # (nodes, edges, ids)
     """Build the fine-spine EXTENSION payload (pure; no capability calls).
 
@@ -100,12 +101,12 @@ def build_extension_payload(
                                              end_char=var.end_char, text=var.text))
             used_transcripts.add(tid)
         node = SegmentNode(
-            rendition=a["rendition"], vad_config_hash=vad_config_hash,
+            rendition=a["rendition"], vad_config_hash=skeleton_config_hash,
             chunk_start=seg.chunk_start, chunk_end=seg.chunk_end,
             index=seg.index, start_time=seg.start_time, end_time=seg.end_time,
             text=seg.text, audio_hash=a["model_input_hash"], source=source_id,
             text_from=(a["transcripts"].get(text_from) if seg.text.strip() else None),
-            text_slices=slices,
+            split_policy=split_policy, text_slices=slices,
         )
         nodes.append(node.to_graph_node())
         seg_ids.append(node.id)
@@ -153,6 +154,7 @@ async def verify_source(
     graph_id: str,            # Graph-storage capability id
     source_id: str,           # Source node id to verify
     rendition_ids: List[str], # The AudioRendition ids the run extended (the fine spine is scoped to these)
+    segment_ids: Optional[List[str]] = None,  # THIS run's committed Segment ids — id-scopes the fine-layer checks (parallel spines); None = all segments under the renditions
 ) -> Optional[SourceVerification]:  # Result, or None if the Source is not found
     """Verify a Source's committed extension via server-side AGGREGATES (D13/D19).
 
@@ -204,21 +206,49 @@ async def verify_source(
         res = await graph_task(queue, graph_id, "query_nodes", query=q.to_dict())
         return int(res.count or 0)
 
-    n_segs = await _ncount()
-    seg_next = await _ecount(relation_type=SpineRelations.NEXT, source_related=part_of_rend)
-    seg_part_of = await _ecount(relation_type=SpineRelations.PART_OF, target_ids=rendition_ids)
-    rend_starts = await _ecount(relation_type=SpineRelations.STARTS_WITH, source_ids=rendition_ids)
-    missing_start = await _ncount(where=[PropertyPredicate("start_time", "is_null")])
-    missing_end = await _ncount(where=[PropertyPredicate("end_time", "is_null")])
+    proj_rows: List[Dict[str, Any]] = []
+    if segment_ids is None:
+        n_segs = await _ncount()
+        seg_next = await _ecount(relation_type=SpineRelations.NEXT, source_related=part_of_rend)
+        seg_part_of = await _ecount(relation_type=SpineRelations.PART_OF, target_ids=rendition_ids)
+        rend_starts = await _ecount(relation_type=SpineRelations.STARTS_WITH, source_ids=rendition_ids)
+        missing_start = await _ncount(where=[PropertyPredicate("start_time", "is_null")])
+        missing_end = await _ncount(where=[PropertyPredicate("end_time", "is_null")])
+        # Bounded projection: sources + owning rendition in ONE pass.
+        sq = NodeQuery(label=TranscriptGraphLabels.SEGMENT, related=part_of_rend,
+                       project=["sources", "rendition_id"])
+        res = await graph_task(queue, graph_id, "query_nodes", query=sq.to_dict())
+        proj_rows = list(res.rows or [])
+    else:
+        # Id-scoped mode (parallel spines, DEC f1024568): every fine-layer
+        # aggregate counts ONLY this run's committed segments — a coexisting
+        # sibling skeleton under the same renditions (its own NEXT chain +
+        # STARTS_WITH anchor) must not fail the structural checks. Batched
+        # (bounded reads; the 500-id convention).
+        async def _icount(ids, **kw):
+            q = NodeQuery(ids=list(ids), label=TranscriptGraphLabels.SEGMENT,
+                          count=True, **kw)
+            res = await graph_task(queue, graph_id, "query_nodes", query=q.to_dict())
+            return int(res.count or 0)
 
-    # Bounded projection: sources + owning rendition in ONE pass.
-    sq = NodeQuery(label=TranscriptGraphLabels.SEGMENT, related=part_of_rend,
-                   project=["sources", "rendition_id"])
-    res = await graph_task(queue, graph_id, "query_nodes", query=sq.to_dict())
+        n_segs = seg_next = seg_part_of = rend_starts = missing_start = missing_end = 0
+        for i in range(0, len(segment_ids), 500):
+            b = list(segment_ids[i:i + 500])
+            n_segs += await _icount(b)
+            seg_next += await _ecount(relation_type=SpineRelations.NEXT, source_ids=b)
+            seg_part_of += await _ecount(relation_type=SpineRelations.PART_OF, source_ids=b)
+            rend_starts += await _ecount(relation_type=SpineRelations.STARTS_WITH, target_ids=b)
+            missing_start += await _icount(b, where=[PropertyPredicate("start_time", "is_null")])
+            missing_end += await _icount(b, where=[PropertyPredicate("end_time", "is_null")])
+            pq = NodeQuery(ids=b, label=TranscriptGraphLabels.SEGMENT,
+                           project=["sources", "rendition_id"])
+            res = await graph_task(queue, graph_id, "query_nodes", query=pq.to_dict())
+            proj_rows.extend(res.rows or [])
+
     missing_sources = 0
     locators = set()
     owning_renditions = set()
-    for r in (res.rows or []):
+    for r in proj_rows:
         sources = r.get("sources") or []
         if not sources:
             missing_sources += 1

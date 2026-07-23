@@ -8,6 +8,27 @@ from cjm_transcript_decomp_core.models import FAWord, TextSegment, VADChunk
 # Strip punctuation for comparison (matches what FA models strip).
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 
+# Sentence-split policy tag (DEC f1024568): versioned because the policy is a
+# SKELETON IDENTITY input — any change to the split rule below must bump it,
+# or re-runs would silently collide with spines a different rule produced.
+# v2 (2026-07-22 probe-drive findings): dotted abbreviations no longer end
+# sentences, and the boundary word lands RIGHT of the cut (half-open fold).
+# v3 (same drive, 'Mr. Gorbachev'): honorific/title stubs guarded. The stub
+# list is a BRIDGE — the ratified endgame is a sentence-segmentation
+# capability replacing this whole token heuristic (see the B.5 work item).
+SENTENCE_SPLIT_POLICY = "sentence-split/v3"
+
+# Closing quotes/brackets a sentence-ending token may trail with ('dispatch."').
+_SENTENCE_CLOSERS = "\"'”’)]}»"
+
+# Dotted-abbreviation shapes that must NOT end a sentence: letter-dot sequences
+# ('U.S.', 'p.m.', 'i.e.') and single initials ('J.').
+_ABBREV_RE = re.compile(r"(?:[A-Za-z]\.)+")
+
+# Honorific/title stubs that must NOT end a sentence ('Mr. Gorbachev').
+_ABBREV_STUBS = {"mr", "mrs", "ms", "dr", "prof", "rev", "fr", "st", "gen",
+                 "col", "capt", "lt", "sgt", "maj", "jr", "sr", "vs"}
+
 
 def _strip_punct(
     text: str,  # Text to normalize
@@ -89,8 +110,13 @@ def assign_words_to_chunks(
 ) -> List[int]:  # Chunk index for each FA word
     """Assign each FA word to a VAD chunk by timestamp overlap.
 
-    Words whose start_time falls within a chunk's [start, end] are assigned to
-    that chunk; words in silence gaps go to the nearest chunk by time proximity.
+    Words whose start_time falls within a chunk's [start, end) are assigned to
+    that chunk — HALF-OPEN, so a word starting exactly on a shared boundary
+    belongs to the chunk that STARTS there (sentence-split cuts land exactly on
+    the next word's start when FA words are contiguous; the old inclusive end
+    pulled that word one chunk LEFT — the off-by-one the 2026-07-22 probe drive
+    caught). Words in silence gaps (incl. exactly at the last chunk's end) go
+    to the nearest chunk by time proximity.
     """
     if not vad_chunks:
         return [0] * len(fa_items)
@@ -101,7 +127,7 @@ def assign_words_to_chunks(
         best_idx = 0
         best_dist = float("inf")
         for i, chunk in enumerate(vad_chunks):
-            if chunk.start_time <= t <= chunk.end_time:
+            if chunk.start_time <= t < chunk.end_time:
                 best_idx = i
                 break
             dist = min(abs(t - chunk.start_time), abs(t - chunk.end_time))
@@ -164,3 +190,74 @@ def tier1_alignment_checks(
             f"{empty}/{len(segments)} segment(s) have EMPTY text (VAD chunk with no aligned words)"
         )
     return warnings
+
+
+def _ends_sentence(
+    token: str,  # One original-text token (an FA word's char-span slice)
+) -> bool:  # True when the token closes a sentence
+    """Does a token end a sentence? (v3 rule: trailing closers stripped, then a
+    sentence-ending mark, EXCEPT dotted abbreviations — 'U.S.', 'p.m.',
+    initials — and honorific/title stubs — 'Mr.', 'Dr.' — both caught splitting
+    mid-sentence by the 2026-07-22 probe drives. Remaining false positives
+    ('etc.', 'Inc.') stay accepted; refinements version the policy tag rather
+    than silently changing committed identity — and the whole token heuristic
+    retires when the sentence-segmentation capability lands.)"""
+    t = token.rstrip(_SENTENCE_CLOSERS)
+    if not t or t[-1] not in ".?!…":
+        return False
+    core = t.lstrip("([{\"'“‘«")
+    if _ABBREV_RE.fullmatch(core):
+        return False
+    return core[:-1].lower() not in _ABBREV_STUBS
+
+
+def split_chunks_at_sentence_gaps(
+    vad_chunks: List[VADChunk],    # The VAD skeleton (segment-local times)
+    fa_items: List[FAWord],        # The AUTHORITATIVE transcriber's FA words (segment-local times)
+    spans: List[Tuple[int, int]],  # Char spans from map_fa_words_to_text (parallel to fa_items)
+    text: str,                     # The authoritative original (punctuated) text
+    min_chunk_s: float = 0.5,      # Min sub-chunk duration — a split never mints a sliver
+) -> List[VADChunk]:  # The refined skeleton, re-indexed (identical content when nothing splits)
+    """The sentence-split stage (SENTENCE_SPLIT_POLICY, DEC f1024568): refine the
+    VAD skeleton by cutting any chunk whose assigned text crosses a sentence end.
+
+    Runs POST-FA, PRE-fold: a chunk holding a sentence-ending word that is not
+    its last word splits at the corresponding FA word gap (midpoint between the
+    ending word's end and the next word's start — the pause the VAD's min-sil
+    threshold failed to cut, finding bc69e3e6). The split decision reads ONLY
+    the authoritative transcriber (montage/textless chunks have no words here
+    and pass through untouched); every transcriber then re-folds over the
+    refined skeleton, so variants stay per-chunk consistent by construction.
+    Both sides of an accepted cut must be >= `min_chunk_s` at accept time
+    (greedy left-to-right), so FA jitter cannot mint unplayable slivers.
+    """
+    assignments = assign_words_to_chunks(fa_items, vad_chunks)
+    by_chunk: Dict[int, List[int]] = {}
+    for wi, ci in enumerate(assignments):
+        by_chunk.setdefault(ci, []).append(wi)
+
+    refined: List[VADChunk] = []
+    for chunk in vad_chunks:
+        words = by_chunk.get(chunk.index, [])
+        cuts: List[float] = []
+        cur_start = chunk.start_time
+        for p in range(len(words) - 1):
+            wi, wj = words[p], words[p + 1]
+            if wi >= len(spans):
+                break  # map_fa_words_to_text ran out of text — no span, no verdict
+            token = text[spans[wi][0]:spans[wi][1]]
+            if not _ends_sentence(token):
+                continue
+            cut = (fa_items[wi].end_time + fa_items[wj].start_time) / 2.0
+            if not (chunk.start_time < cut < chunk.end_time):
+                continue
+            if cut - cur_start < min_chunk_s or chunk.end_time - cut < min_chunk_s:
+                continue
+            cuts.append(cut)
+            cur_start = cut
+        bounds = [chunk.start_time] + cuts + [chunk.end_time]
+        for k in range(len(bounds) - 1):
+            refined.append(VADChunk(index=0, start_time=bounds[k], end_time=bounds[k + 1]))
+    for i, c in enumerate(refined):
+        c.index = i
+    return refined
