@@ -63,6 +63,8 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                      help="Run the post-FA sentence-split stage (DEC f1024568): chunks whose "
                           "text crosses a sentence end split at the FA word gap; commits a "
                           "PARALLEL spine (new skeleton hash) — existing spines are untouched")
+    run.add_argument("--seg-capability", default="cjm-capability-pysbd",
+                     help="Sentence-segmentation capability name (B.5; loaded only with --sentence-split)")
     run.add_argument("--split-min-chunk-s", type=float, default=0.5,
                      help="Sentence-split min sub-chunk duration guard, seconds (identity input)")
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
@@ -140,6 +142,7 @@ async def run_command(
         assume_yes=args.yes,
         sentence_split=args.sentence_split,
         split_min_chunk_s=args.split_min_chunk_s,
+        seg_capability=args.seg_capability,
     )
 
     # CR-7 GPU subtree attribution is opt-in: --sysmon-capability threads the monitor
@@ -150,6 +153,9 @@ async def run_command(
         sysmon_capability_name=args.sysmon_capability,
     )
     instance_ids = [cfg.vad_capability, cfg.fa_capability, cfg.graph_capability]
+    if cfg.sentence_split:
+        # B.5: the segmentation capability loads only when the split stage runs.
+        instance_ids.insert(2, cfg.seg_capability)
     load_order = ([args.sysmon_capability] if args.sysmon_capability else []) + instance_ids
     # F10: --graph-db-path threads a caller-wins config into the graph load
     # (the C8 pattern correction-core already used; scratch-graph loop-backs).

@@ -119,6 +119,7 @@ class DecompConfig:
     assume_yes: bool = False   # Auto-accept HITL seams (headless mode)
     sentence_split: bool = False    # Run the post-FA sentence-split stage (DEC f1024568; parallel spine)
     split_min_chunk_s: float = 0.5  # Sentence-split min sub-chunk duration guard (seconds)
+    seg_capability: str = "cjm-capability-pysbd"  # Sentence-segmentation capability id (B.5; loaded only when sentence_split)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict snapshot for the manifest
         """Serialize to a plain dict."""
@@ -159,7 +160,7 @@ class DecompManifest:
     split_policy: Optional[str] = None  # Split policy+version that refined this run's skeleton (None = raw VAD)
 
     FORMAT: str = field(default="cjm-transcript-decomp-core/run-manifest", repr=False)  # Format tag
-    VERSION: str = field(default="0.2.2", repr=False)                                   # Schema version
+    VERSION: str = field(default="0.2.3", repr=False)                                   # Schema version (0.2.3: capability-driven sentence split — seg capability in `capabilities` + segmenter identity in the skeleton composite)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form for JSON serialization
         """Serialize to a plain dict with nested sources."""

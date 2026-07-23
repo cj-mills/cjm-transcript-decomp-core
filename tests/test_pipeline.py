@@ -64,3 +64,25 @@ def test_alignment_nodes_ride_the_task_channel():
     assert comp.nodes[2].control == {"force": False}
     run = new_composition_run(comp, "r")
     assert set(run.ready_nodes()) == {"vad_0000", "fa_t0_0000", "fa_t1_0000", "vad_0002", "fa_t0_0002"}
+
+
+def test_alignment_composition_seg_nodes():
+    # B.5: with a segmentation capability + authoritative transcriber, each
+    # non-skipped pseg where the authoritative transcriber has text also gets
+    # one sentence_segmentation/segment_text node over that text — riding the
+    # SAME composition (the text comes from the manifest, not from FA).
+    comp, metas = build_alignment_composition(
+        SEGS, "silero", "qwen3", ["whisper", "voxtral"],
+        seg_id="pysbd", seg_text_from="voxtral")
+    by_name = {n.id: n for n in comp.nodes}
+    # pseg0: voxtral has text -> seg node; pseg1: skipped; pseg2: voxtral empty -> none.
+    assert metas[0]["seg_node"] == "seg_0000"
+    seg = by_name["seg_0000"]
+    assert seg.kwargs == {"text": "Alpha."}
+    assert seg.task_name == "sentence_segmentation" and seg.method == "segment_text"
+    assert "seg_node" not in metas[2]
+    assert len(comp.nodes) == 6
+    # Without a seg capability the composition is unchanged (no seg nodes).
+    comp2, metas2 = build_alignment_composition(SEGS, "silero", "qwen3",
+                                                ["whisper", "voxtral"])
+    assert len(comp2.nodes) == 5 and all("seg_node" not in m for m in metas2)

@@ -1,7 +1,7 @@
 """Pure forced-alignment logic (no capability calls): map FA words back to character spans in the original text, assign words to VAD chunks by timestamp, and build one text segment per VAD chunk. Extracted from the page-centric ForcedAlignmentService (Tier-1 logic)."""
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from cjm_transcript_decomp_core.models import FAWord, TextSegment, VADChunk
 
@@ -9,25 +9,14 @@ from cjm_transcript_decomp_core.models import FAWord, TextSegment, VADChunk
 _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 
 # Sentence-split policy tag (DEC f1024568): versioned because the policy is a
-# SKELETON IDENTITY input — any change to the split rule below must bump it,
-# or re-runs would silently collide with spines a different rule produced.
-# v2 (2026-07-22 probe-drive findings): dotted abbreviations no longer end
-# sentences, and the boundary word lands RIGHT of the cut (half-open fold).
-# v3 (same drive, 'Mr. Gorbachev'): honorific/title stubs guarded. The stub
-# list is a BRIDGE — the ratified endgame is a sentence-segmentation
-# capability replacing this whole token heuristic (see the B.5 work item).
-SENTENCE_SPLIT_POLICY = "sentence-split/v3"
-
-# Closing quotes/brackets a sentence-ending token may trail with ('dispatch."').
-_SENTENCE_CLOSERS = "\"'”’)]}»"
-
-# Dotted-abbreviation shapes that must NOT end a sentence: letter-dot sequences
-# ('U.S.', 'p.m.', 'i.e.') and single initials ('J.').
-_ABBREV_RE = re.compile(r"(?:[A-Za-z]\.)+")
-
-# Honorific/title stubs that must NOT end a sentence ('Mr. Gorbachev').
-_ABBREV_STUBS = {"mr", "mrs", "ms", "dr", "prof", "rev", "fr", "st", "gen",
-                 "col", "capt", "lt", "sgt", "maj", "jr", "sr", "vs"}
+# SKELETON IDENTITY input — any change to the split rule must bump it, or
+# re-runs would silently collide with spines a different rule produced.
+# 'capability' (B.5, DEC cc904eee): sentence boundaries now come from a
+# sentence-segmentation CAPABILITY (pySBD first) as char spans over the
+# authoritative text — the v1-v3 token heuristic (closer/abbreviation/stub
+# lists) is RETIRED. The segmenter's identity (capability name + config hash)
+# joins the skeleton-identity composite beside this tag.
+SENTENCE_SPLIT_POLICY = "sentence-split/capability"
 
 
 def _strip_punct(
@@ -192,31 +181,36 @@ def tier1_alignment_checks(
     return warnings
 
 
-def _ends_sentence(
-    token: str,  # One original-text token (an FA word's char-span slice)
-) -> bool:  # True when the token closes a sentence
-    """Does a token end a sentence? (v3 rule: trailing closers stripped, then a
-    sentence-ending mark, EXCEPT dotted abbreviations — 'U.S.', 'p.m.',
-    initials — and honorific/title stubs — 'Mr.', 'Dr.' — both caught splitting
-    mid-sentence by the 2026-07-22 probe drives. Remaining false positives
-    ('etc.', 'Inc.') stay accepted; refinements version the policy tag rather
-    than silently changing committed identity — and the whole token heuristic
-    retires when the sentence-segmentation capability lands.)"""
-    t = token.rstrip(_SENTENCE_CLOSERS)
-    if not t or t[-1] not in ".?!…":
-        return False
-    core = t.lstrip("([{\"'“‘«")
-    if _ABBREV_RE.fullmatch(core):
-        return False
-    return core[:-1].lower() not in _ABBREV_STUBS
+def sentence_end_word_indices(
+    spans: List[Tuple[int, int]],           # FA-word char spans from map_fa_words_to_text (ordered)
+    sentence_spans: List[Tuple[int, int]],  # Sentence char spans over the SAME text (ordered, non-overlapping)
+) -> Set[int]:  # Indices of FA words that END a sentence
+    """Map capability-delivered sentence boundaries onto FA words (B.5: the
+    successor of the v1-v3 `_ends_sentence` token heuristic).
+
+    A word ends a sentence when it is the LAST word whose span STARTS before
+    that sentence's end_char. Both lists are ordered over the same text, so a
+    single forward merge walk suffices; a sentence no word starts in
+    contributes nothing, and the trailing word of the text marks its sentence
+    but can never produce a cut (cuts live BETWEEN consecutive words)."""
+    out: Set[int] = set()
+    wi = 0
+    for ss, se in sentence_spans:
+        last = None
+        while wi < len(spans) and spans[wi][0] < se:
+            if spans[wi][0] >= ss:  # the word must START inside the sentence
+                last = wi
+            wi += 1
+        if last is not None:
+            out.add(last)
+    return out
 
 
 def split_chunks_at_sentence_gaps(
-    vad_chunks: List[VADChunk],    # The VAD skeleton (segment-local times)
-    fa_items: List[FAWord],        # The AUTHORITATIVE transcriber's FA words (segment-local times)
-    spans: List[Tuple[int, int]],  # Char spans from map_fa_words_to_text (parallel to fa_items)
-    text: str,                     # The authoritative original (punctuated) text
-    min_chunk_s: float = 0.5,      # Min sub-chunk duration — a split never mints a sliver
+    vad_chunks: List[VADChunk],  # The VAD skeleton (segment-local times)
+    fa_items: List[FAWord],      # The AUTHORITATIVE transcriber's FA words (segment-local times)
+    end_words: Set[int],         # FA-word indices that END a sentence (sentence_end_word_indices)
+    min_chunk_s: float = 0.5,    # Min sub-chunk duration — a split never mints a sliver
 ) -> List[VADChunk]:  # The refined skeleton, re-indexed (identical content when nothing splits)
     """The sentence-split stage (SENTENCE_SPLIT_POLICY, DEC f1024568): refine the
     VAD skeleton by cutting any chunk whose assigned text crosses a sentence end.
@@ -224,12 +218,15 @@ def split_chunks_at_sentence_gaps(
     Runs POST-FA, PRE-fold: a chunk holding a sentence-ending word that is not
     its last word splits at the corresponding FA word gap (midpoint between the
     ending word's end and the next word's start — the pause the VAD's min-sil
-    threshold failed to cut, finding bc69e3e6). The split decision reads ONLY
-    the authoritative transcriber (montage/textless chunks have no words here
-    and pass through untouched); every transcriber then re-folds over the
-    refined skeleton, so variants stay per-chunk consistent by construction.
-    Both sides of an accepted cut must be >= `min_chunk_s` at accept time
-    (greedy left-to-right), so FA jitter cannot mint unplayable slivers.
+    threshold failed to cut, finding bc69e3e6). Sentence ends arrive
+    PRECOMPUTED (B.5): the segmentation capability's char spans over the
+    authoritative text, mapped onto FA words by `sentence_end_word_indices` —
+    this function no longer inspects text. The split decision reads ONLY the
+    authoritative transcriber (montage/textless chunks have no words here and
+    pass through untouched); every transcriber then re-folds over the refined
+    skeleton, so variants stay per-chunk consistent by construction. Both
+    sides of an accepted cut must be >= `min_chunk_s` at accept time (greedy
+    left-to-right), so FA jitter cannot mint unplayable slivers.
     """
     assignments = assign_words_to_chunks(fa_items, vad_chunks)
     by_chunk: Dict[int, List[int]] = {}
@@ -243,10 +240,7 @@ def split_chunks_at_sentence_gaps(
         cur_start = chunk.start_time
         for p in range(len(words) - 1):
             wi, wj = words[p], words[p + 1]
-            if wi >= len(spans):
-                break  # map_fa_words_to_text ran out of text — no span, no verdict
-            token = text[spans[wi][0]:spans[wi][1]]
-            if not _ends_sentence(token):
+            if wi not in end_words:
                 continue
             cut = (fa_items[wi].end_time + fa_items[wj].start_time) / 2.0
             if not (chunk.start_time < cut < chunk.end_time):

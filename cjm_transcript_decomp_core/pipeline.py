@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_capability_primitives.forced_alignment import ForcedAlignResult
+from cjm_capability_primitives.sentence_segmentation import SentenceSegmentationResult
 from cjm_capability_primitives.vad import VADResult
 from cjm_context_graph_layer.declare import Derivation, derivation_to_graph
 from cjm_context_graph_layer.journal import journal_extend, sidecar_journal_path, wires_handlers
@@ -20,7 +21,8 @@ from cjm_substrate.core.queue import JobQueue, JobStatus
 from cjm_substrate.core.workspace import resolve_recorded_tree
 from cjm_transcript_decomp_core.alignment import (assign_words_to_chunks,
                                                   build_segments_from_alignment,
-                                                  map_fa_words_to_text, SENTENCE_SPLIT_POLICY,
+                                                  map_fa_words_to_text, sentence_end_word_indices,
+                                                  SENTENCE_SPLIT_POLICY,
                                                   split_chunks_at_sentence_gaps,
                                                   tier1_alignment_checks)
 from cjm_transcript_decomp_core.graph import (build_extension_payload, resolve_root_ids,
@@ -30,12 +32,13 @@ from cjm_transcript_decomp_core.models import (DecompConfig, DecompManifest, Dec
                                                SegmentVariant, VADChunk)
 
 # Typed wire-kind registration (stage 2): importing the DTO classes is what
-# lets the proxy's wire_decode hand this host process TYPED results. Both result
-# nouns live in cjm-capability-primitives (Option C / PILLAR 1c — the tool/host
-# depend on the data noun, never the adapter machinery). The tuple keeps these
-# SIDE-EFFECT imports referenced so the canonical emit cannot prune them.
+# lets the proxy's wire_decode hand this host process TYPED results. All three
+# result nouns live in cjm-capability-primitives (Option C / PILLAR 1c — the
+# tool/host depend on the data noun, never the adapter machinery). The tuple
+# keeps these SIDE-EFFECT imports referenced so the canonical emit cannot
+# prune them.
 
-_REGISTERED_WIRE_KINDS = (VADResult, ForcedAlignResult)
+_REGISTERED_WIRE_KINDS = (VADResult, ForcedAlignResult, SentenceSegmentationResult)
 
 logger = logging.getLogger(__name__)
 
@@ -107,18 +110,26 @@ def build_alignment_composition(
     fa_id: str,                # Forced-alignment capability instance id
     transcribers: List[str],   # Transcriber names to align (manifest `transcripts` keys, stable order)
     force: bool = False,       # Per-call cache-bypass control flag
+    seg_id: Optional[str] = None,        # Sentence-segmentation capability instance id (B.5; None = no split stage)
+    seg_text_from: Optional[str] = None,  # Authoritative transcriber whose text the segmenter reads
 ) -> Tuple[Composition, List[Dict[str, Any]]]:  # (composition, per-pseg meta rows)
-    """Build the whole-source M×(VAD ∥ T×FA) composition (D8 fan-in, stage-5 variants).
+    """Build the whole-source M×(VAD ∥ T×FA ∥ SEG) composition (D8 fan-in, stage-5 variants).
 
     Each pipeline segment contributes one VAD node + one FA node PER TRANSCRIBER
     with non-empty text — VAD is audio-only (run once; the shared skeleton), FA
-    maps each transcriber's text onto it. All nodes are independent; the host's
-    alignment fold fans them in. Pipeline segments where EVERY transcriber's
-    text is empty are recorded as skipped meta rows and contribute no nodes.
+    maps each transcriber's text onto it. With the sentence-split stage on
+    (`seg_id` + `seg_text_from`, B.5), each pipeline segment where the
+    authoritative transcriber has text also contributes one sentence-
+    segmentation node over that text (the text is known from the manifest, so
+    segmentation rides the SAME composition as VAD/FA — no second round trip).
+    All nodes are independent; the host's alignment fold fans them in. Pipeline
+    segments where EVERY transcriber's text is empty are recorded as skipped
+    meta rows and contribute no nodes.
 
-    Stage 8 (Option C): every node rides the TASK CHANNEL now — VAD on
-    vad/detect_speech, FA on forced_alignment/align — and per-call `force` rides
-    `control` (the adapters own caching). The native-routed path is gone.
+    Stage 8 (Option C): every node rides the TASK CHANNEL — VAD on
+    vad/detect_speech, FA on forced_alignment/align, segmentation on
+    sentence_segmentation/segment_text — and per-call `force` rides `control`
+    (the adapters own caching; the segmentation adapter is cache-free).
     """
     nodes: List[CompositionNode] = []
     metas: List[Dict[str, Any]] = []
@@ -154,8 +165,18 @@ def build_alignment_composition(
                                          task_name="forced_alignment", method="align",
                                          control={"force": force}))
             fa_nodes[t] = fa_n
-        metas.append({"skipped": False, "seg_start": seg_start, "pseg_index": i,
-                      "vad_node": vad_n, "fa_nodes": fa_nodes, "texts": nonempty})
+        meta = {"skipped": False, "seg_start": seg_start, "pseg_index": i,
+                "vad_node": vad_n, "fa_nodes": fa_nodes, "texts": nonempty}
+        if seg_id and seg_text_from in nonempty:
+            seg_n = f"seg_{i:04d}"
+            # Sentence segmentation via the task channel over the AUTHORITATIVE
+            # transcriber's text (the split stage reads only that transcriber).
+            nodes.append(CompositionNode(seg_n, seg_id,
+                                         {"text": nonempty[seg_text_from]},
+                                         task_name="sentence_segmentation",
+                                         method="segment_text"))
+            meta["seg_node"] = seg_n
+        metas.append(meta)
     return Composition(nodes=nodes), metas
 
 
@@ -180,7 +201,9 @@ async def decompose_source(
     seg_list = list(source.get("segments") or [])
 
     comp, metas = build_alignment_composition(
-        seg_list, cfg.vad_capability, cfg.fa_capability, transcribers, force=cfg.force)
+        seg_list, cfg.vad_capability, cfg.fa_capability, transcribers, force=cfg.force,
+        seg_id=(cfg.seg_capability if cfg.sentence_split else None),
+        seg_text_from=text_from)
     results: Dict[str, Any] = {}
     if comp.nodes:
         comp_id = await queue.submit_composition(comp)
@@ -209,16 +232,20 @@ async def decompose_source(
             per_t_words[t] = fa_words_from_result(results[fa_n])
             per_t_spans[t] = map_fa_words_to_text(m["texts"][t], per_t_words[t])
 
-        # Sentence-split stage (DEC f1024568): refine the shared skeleton at the
-        # AUTHORITATIVE transcriber's sentence-gap words BEFORE any fold — every
-        # transcriber re-folds over the same refined skeleton, so variants stay
-        # per-chunk consistent by construction. Chunks the authoritative
+        # Sentence-split stage (DEC f1024568 / B.5 capability form): refine the
+        # shared skeleton at the AUTHORITATIVE transcriber's sentence ends BEFORE
+        # any fold — every transcriber re-folds over the same refined skeleton,
+        # so variants stay per-chunk consistent by construction. Sentence
+        # boundaries come from the segmentation capability's char spans over the
+        # authoritative text, mapped onto FA words. Chunks the authoritative
         # transcriber has no words for (montage/textless) pass through whole.
-        if cfg.sentence_split and text_from in per_t_words:
+        if cfg.sentence_split and text_from in per_t_words and m.get("seg_node"):
+            sentence_spans = sentence_spans_from_result(results[m["seg_node"]])
+            end_words = sentence_end_word_indices(per_t_spans[text_from], sentence_spans)
             n_before = len(vad_chunks)
             vad_chunks = split_chunks_at_sentence_gaps(
-                vad_chunks, per_t_words[text_from], per_t_spans[text_from],
-                m["texts"][text_from], min_chunk_s=cfg.split_min_chunk_s)
+                vad_chunks, per_t_words[text_from], end_words,
+                min_chunk_s=cfg.split_min_chunk_s)
             if len(vad_chunks) != n_before:
                 logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s: "
                             f"sentence-split {n_before} -> {len(vad_chunks)} chunk(s)")
@@ -402,7 +429,8 @@ async def run_decomp(
         run_id=run_id, created_at=time.time(), config=cfg.to_dict(),
         source_manifest=str(source_manifest_path),
         source_format=src.get("format", ""), source_version=src.get("version", ""),
-        capabilities=collect_capability_info(manager, [cfg.vad_capability, cfg.fa_capability, cfg.graph_capability]),
+        capabilities=collect_capability_info(manager, [cfg.vad_capability, cfg.fa_capability, cfg.graph_capability]
+                                             + ([cfg.seg_capability] if cfg.sentence_split else [])),
     )
     vad_config_hash = str((manifest.capabilities.get(cfg.vad_capability) or {}).get("config_hash") or "")
     # Skeleton identity (DEC f1024568): the Segment identity input WIDENS to a
@@ -413,10 +441,16 @@ async def run_decomp(
     split_policy = SENTENCE_SPLIT_POLICY if cfg.sentence_split else None
     skeleton_config_hash = vad_config_hash
     if split_policy:
+        # B.5: the SEGMENTER's identity (capability name + effective-config
+        # hash) joins the composite — two spines cut by different segmenters
+        # (or the same segmenter reconfigured) can never share node ids.
+        seg_config_hash = str((manifest.capabilities.get(cfg.seg_capability) or {}).get("config_hash") or "")
         skeleton_config_hash = compute_config_hash({
             "vad_config_hash": vad_config_hash,
             "split_policy": split_policy,
             "split_min_chunk_s": cfg.split_min_chunk_s,
+            "seg_capability": cfg.seg_capability,
+            "seg_config_hash": seg_config_hash,
         })
     manifest.skeleton_config_hash = skeleton_config_hash
     manifest.split_policy = split_policy
@@ -540,3 +574,10 @@ def decomp_replay_handlers() -> Dict[str, Any]:  # verb -> async handler(queue, 
     `apply_wires` (identity-comparable across cores: transcription also emits
     `derivation`, and the shared handler keeps that collision legal)."""
     return wires_handlers("spine-extension", "derivation")
+
+
+def sentence_spans_from_result(
+    result: "SentenceSegmentationResult",  # Typed segmentation result (wire-decoded at the proxy)
+) -> List[Tuple[int, int]]:  # Ordered (start_char, end_char) sentence spans
+    """Normalize a typed sentence-segmentation result into char-span tuples (pure; B.5)."""
+    return [(int(s.start_char), int(s.end_char)) for s in result.spans]
