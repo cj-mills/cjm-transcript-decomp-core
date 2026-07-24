@@ -117,7 +117,7 @@ class DecompConfig:
     media_type: str = "audio"  # Source media type
     force: bool = False        # Bypass capability-side caches (VAD + FA)
     assume_yes: bool = False   # Auto-accept HITL seams (headless mode)
-    sentence_split: bool = False    # Run the post-FA sentence-split stage (DEC f1024568; parallel spine)
+    sentence_split: bool = True     # Run the post-FA sentence-split stage (DEC f1024568; parallel spine) — DEFAULT-ON per DEC 552bde8d (hiding splits just hides model failures)
     split_min_chunk_s: float = 0.5  # Sentence-split min sub-chunk duration guard (seconds)
     seg_capability: str = "cjm-capability-pysbd"  # Sentence-segmentation capability id (B.5; loaded only when sentence_split)
 

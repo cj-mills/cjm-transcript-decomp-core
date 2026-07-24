@@ -59,12 +59,13 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                           "default: the manifest's sole transcriber)")
     run.add_argument("--sysmon-capability", default=None, help="monitor capability for GPU subtree attribution (CR-7); loaded first; default: no monitor")
     run.add_argument("--language", default="English", help="Forced-alignment language")
-    run.add_argument("--sentence-split", action="store_true",
+    run.add_argument("--sentence-split", action=argparse.BooleanOptionalAction, default=True,
                      help="Run the post-FA sentence-split stage (DEC f1024568): chunks whose "
                           "text crosses a sentence end split at the FA word gap; commits a "
-                          "PARALLEL spine (new skeleton hash) — existing spines are untouched")
+                          "PARALLEL spine (new skeleton hash) — existing spines are untouched. "
+                          "DEFAULT-ON (DEC 552bde8d); --no-sentence-split opts out")
     run.add_argument("--seg-capability", default="cjm-capability-pysbd",
-                     help="Sentence-segmentation capability name (B.5; loaded only with --sentence-split)")
+                     help="Sentence-segmentation capability name (B.5; skipped with --no-sentence-split)")
     run.add_argument("--split-min-chunk-s", type=float, default=0.5,
                      help="Sentence-split min sub-chunk duration guard, seconds (identity input)")
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
@@ -161,7 +162,17 @@ async def run_command(
     # (the C8 pattern correction-core already used; scratch-graph loop-backs).
     configs = ({cfg.graph_capability: {"db_path": args.graph_db_path}}
                if args.graph_db_path else None)
-    load_capabilities(manager, load_order, configs=configs)
+    try:
+        load_capabilities(manager, load_order, configs=configs)
+    except Exception as e:
+        # Sentence-split is DEFAULT-ON (DEC 552bde8d): an env without the
+        # segmentation capability must refuse with both outs, not crash.
+        if cfg.sentence_split and cfg.seg_capability in str(e):
+            raise SystemExit(
+                f"sentence-split is default-on and needs {cfg.seg_capability}: {e}\n"
+                f"either install it (cjm-ctl install-all with the capabilities yaml "
+                f"adds the env + manifest additively) or pass --no-sentence-split")
+        raise
 
     queue = JobQueue(deps=manager, sysmon_capability_name=args.sysmon_capability)
     await queue.start()
