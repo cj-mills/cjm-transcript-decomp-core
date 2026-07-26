@@ -68,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                      help="Sentence-segmentation capability name (B.5; skipped with --no-sentence-split)")
     run.add_argument("--split-min-chunk-s", type=float, default=0.5,
                      help="Sentence-split min sub-chunk duration guard, seconds (identity input)")
+    run.add_argument("--respine", action="store_true",
+                     help="Mint a FRESH skeleton spine under the SAME config (DEC 9241564f): "
+                          "the run id joins the Segment identity input, so the new spine "
+                          "coexists with — never collides into — the config-identical one. "
+                          "The recovery for post-upgrade re-runs the verify-collide refuses "
+                          "(finding e8458f6e); provenance = this run's manifest")
     run.add_argument("--force", action="store_true", help="Bypass capability-side caches (VAD + FA)")
     run.add_argument("-y", "--yes", action="store_true", help="Auto-accept HITL seams (headless mode)")
     run.add_argument("--output", default=None, help="Decomp-manifest output path (single-manifest runs only; default: <output-dir>/<run_id>.json)")
@@ -144,6 +150,7 @@ async def run_command(
         sentence_split=args.sentence_split,
         split_min_chunk_s=args.split_min_chunk_s,
         seg_capability=args.seg_capability,
+        respine=args.respine,
     )
 
     # CR-7 GPU subtree attribution is opt-in: --sysmon-capability threads the monitor

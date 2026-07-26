@@ -439,19 +439,17 @@ async def run_decomp(
     # when sentence-split is on, so split spines COEXIST with the originals by
     # construction (no node id is shared across skeletons).
     split_policy = SENTENCE_SPLIT_POLICY if cfg.sentence_split else None
-    skeleton_config_hash = vad_config_hash
-    if split_policy:
-        # B.5: the SEGMENTER's identity (capability name + effective-config
-        # hash) joins the composite — two spines cut by different segmenters
-        # (or the same segmenter reconfigured) can never share node ids.
-        seg_config_hash = str((manifest.capabilities.get(cfg.seg_capability) or {}).get("config_hash") or "")
-        skeleton_config_hash = compute_config_hash({
-            "vad_config_hash": vad_config_hash,
-            "split_policy": split_policy,
-            "split_min_chunk_s": cfg.split_min_chunk_s,
-            "seg_capability": cfg.seg_capability,
-            "seg_config_hash": seg_config_hash,
-        })
+    # B.5: the SEGMENTER's identity (capability name + effective-config hash)
+    # joins the composite — two spines cut by different segmenters (or the
+    # same segmenter reconfigured) can never share node ids. --respine widens
+    # the identity with THIS run's id (fresh spine, same config, DEC 9241564f).
+    seg_config_hash = (str((manifest.capabilities.get(cfg.seg_capability) or {}).get("config_hash") or "")
+                       if split_policy else "")
+    skeleton_config_hash = compute_skeleton_hash(
+        vad_config_hash, split_policy=split_policy,
+        split_min_chunk_s=cfg.split_min_chunk_s,
+        seg_capability=cfg.seg_capability, seg_config_hash=seg_config_hash,
+        respine_token=run_id if cfg.respine else None)
     manifest.skeleton_config_hash = skeleton_config_hash
     manifest.split_policy = split_policy
     # Pipeline writes append through to the graph db's SIDECAR journal (DEC ccbab9f5 /
@@ -581,3 +579,34 @@ def sentence_spans_from_result(
 ) -> List[Tuple[int, int]]:  # Ordered (start_char, end_char) sentence spans
     """Normalize a typed sentence-segmentation result into char-span tuples (pure; B.5)."""
     return [(int(s.start_char), int(s.end_char)) for s in result.spans]
+
+
+def compute_skeleton_hash(
+    vad_config_hash: str,                 # The VAD stage's effective-config hash (the legacy identity)
+    split_policy: Optional[str] = None,   # Split policy+version when the split stage ran (None = no split)
+    split_min_chunk_s: float = 0.5,       # Split guard (identity input when splitting)
+    seg_capability: str = "",             # Segmenter capability name (identity input when splitting, B.5)
+    seg_config_hash: str = "",            # Segmenter effective-config hash (identity input when splitting)
+    respine_token: Optional[str] = None,  # Distinct-spine token (--respine, DEC 9241564f); None = normal identity
+) -> str:  # The skeleton-config hash every Segment id + skeleton_hash prop derive from
+    """Skeleton identity, pure (DEC f1024568 + 9241564f).
+
+    The raw VAD hash when no split stage runs (legacy-identical ids); a
+    composite over {vad, split policy+params, segmenter identity} when
+    sentence-split is on. `respine_token` WIDENS whichever identity applies:
+    same config, FRESH spine, as a deliberate act — the minted hash can never
+    collide with the config-identical spine (the e8458f6e post-upgrade
+    verify-collide), and the token (the decomp run id) keeps the re-spine
+    provenance-visible in the manifest."""
+    h = vad_config_hash
+    if split_policy:
+        h = compute_config_hash({
+            "vad_config_hash": vad_config_hash,
+            "split_policy": split_policy,
+            "split_min_chunk_s": split_min_chunk_s,
+            "seg_capability": seg_capability,
+            "seg_config_hash": seg_config_hash,
+        })
+    if respine_token:
+        h = compute_config_hash({"base_skeleton_hash": h, "respine": str(respine_token)})
+    return h

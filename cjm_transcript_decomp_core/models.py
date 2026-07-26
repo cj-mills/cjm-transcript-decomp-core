@@ -120,6 +120,7 @@ class DecompConfig:
     sentence_split: bool = True     # Run the post-FA sentence-split stage (DEC f1024568; parallel spine) — DEFAULT-ON per DEC 552bde8d (hiding splits just hides model failures)
     split_min_chunk_s: float = 0.5  # Sentence-split min sub-chunk duration guard (seconds)
     seg_capability: str = "cjm-capability-pysbd"  # Sentence-segmentation capability id (B.5; loaded only when sentence_split)
+    respine: bool = False           # Mint a FRESH skeleton under the SAME config (DEC 9241564f): the run id joins the identity input, so the new spine never collides with the config-identical one (post-upgrade re-runs, finding e8458f6e)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict snapshot for the manifest
         """Serialize to a plain dict."""

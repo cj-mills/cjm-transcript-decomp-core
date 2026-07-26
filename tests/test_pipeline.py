@@ -86,3 +86,32 @@ def test_alignment_composition_seg_nodes():
     comp2, metas2 = build_alignment_composition(SEGS, "silero", "qwen3",
                                                 ["whisper", "voxtral"])
     assert len(comp2.nodes) == 5 and all("seg_node" not in m for m in metas2)
+
+
+def test_compute_skeleton_hash_identity_and_respine():
+    """DEC f1024568 + 9241564f: no-split = the raw VAD hash (legacy-identical
+    ids); split = the B.5 composite; --respine widens EITHER identity with the
+    run token — distinct from the config-identical spine, deterministic per
+    token, and never equal across tokens."""
+    from cjm_transcript_decomp_core.pipeline import compute_skeleton_hash
+    vad = "vadhash123"
+    assert compute_skeleton_hash(vad) == vad
+    split = compute_skeleton_hash(vad, split_policy="pysbd-sentence-v2",
+                                  split_min_chunk_s=0.5,
+                                  seg_capability="cjm-capability-pysbd",
+                                  seg_config_hash="seghash")
+    assert split != vad
+    assert split == compute_skeleton_hash(vad, split_policy="pysbd-sentence-v2",
+                                          split_min_chunk_s=0.5,
+                                          seg_capability="cjm-capability-pysbd",
+                                          seg_config_hash="seghash")
+    r1 = compute_skeleton_hash(vad, respine_token="decomp_run_1")
+    r2 = compute_skeleton_hash(vad, respine_token="decomp_run_2")
+    assert r1 != vad and r2 != vad and r1 != r2
+    assert r1 == compute_skeleton_hash(vad, respine_token="decomp_run_1")
+    rs = compute_skeleton_hash(vad, split_policy="pysbd-sentence-v2",
+                               split_min_chunk_s=0.5,
+                               seg_capability="cjm-capability-pysbd",
+                               seg_config_hash="seghash",
+                               respine_token="decomp_run_1")
+    assert rs not in (split, r1, vad)
