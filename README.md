@@ -19,6 +19,8 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `assign_words_to_chunks` _function_ — Assign each FA word to a VAD chunk by timestamp overlap.
 - `build_segments_from_alignment` _function_ — Build a TextSegment per VAD chunk by grouping words by chunk assignment.
 - `map_fa_words_to_text` _function_ — Map forced-alignment words back to character spans in the original text.
+- `sentence_end_word_indices` _function_ — Map capability-delivered sentence boundaries onto FA words (B.5: the
+- `split_chunks_at_sentence_gaps` _function_ — The sentence-split stage (SENTENCE_SPLIT_POLICY, DEC f1024568): refine the
 - `tier1_alignment_checks` _function_ — Tier-1 deterministic pre-filters for the alignment-review seam (no AI).
 
 ### `cjm_transcript_decomp_core.cli`
@@ -49,14 +51,16 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 
 ### `cjm_transcript_decomp_core.pipeline`
 
-- `build_alignment_composition` _function_ — Build the whole-source M×(VAD ∥ T×FA) composition (D8 fan-in, stage-5 variants).
+- `build_alignment_composition` _function_ — Build the whole-source M×(VAD ∥ T×FA ∥ SEG) composition (D8 fan-in, stage-5 variants).
 - `collect_capability_info` _function_ — Record capability identity + data-DB pointers for the run manifest (provenance).
+- `compute_skeleton_hash` _function_ — Skeleton identity, pure (DEC f1024568 + 9241564f).
 - `confirm_seam` _function_ — HITL approval seam in its cheapest viable form (log + optional CLI prompt).
 - `decomp_replay_handlers` _function_ — The decomp core's replay vocabulary (DEC 426658f1, replay stays DOMAIN-OWNED).
 - `decompose_source` _function_ — Decompose one source into aligned fine segments with per-transcriber variants.
 - `fa_words_from_result` _function_ — Normalize a typed forced-alignment result into FA words (pure; stage 3).
 - `load_source_manifest` _function_ — Load + lightly validate a transcription-core run manifest.
 - `run_decomp` _function_ — Extend every source in a transcription run manifest with its fine spine.
+- `sentence_spans_from_result` _function_ — Normalize a typed sentence-segmentation result into char-span tuples (pure; B.5).
 - `submit_and_wait` _function_ — Submit one capability job, wait for it, and return its result (raise on failure).
 - `vad_chunks_from_result` _function_ — Normalize a typed VAD result into segment-local VAD chunks.
 
