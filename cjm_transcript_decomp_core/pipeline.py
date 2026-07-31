@@ -5,7 +5,7 @@ import logging
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from cjm_capability_primitives.forced_alignment import ForcedAlignResult
 from cjm_capability_primitives.sentence_segmentation import SentenceSegmentationResult
@@ -21,6 +21,7 @@ from cjm_substrate.core.queue import JobQueue, JobStatus
 from cjm_substrate.core.workspace import resolve_recorded_tree
 from cjm_transcript_decomp_core.alignment import (assign_words_to_chunks,
                                                   build_segments_from_alignment,
+                                                  carve_chunks_at_event_spans, EVENT_SPLIT_POLICY,
                                                   map_fa_words_to_text, sentence_end_word_indices,
                                                   SENTENCE_SPLIT_POLICY,
                                                   split_chunks_at_sentence_gaps,
@@ -187,6 +188,7 @@ async def decompose_source(
     source_index: int,         # Position of this source within the run
     transcribers: List[str],   # Transcriber names (manifest order)
     text_from: str,            # Authoritative transcriber (layer-0 text)
+    event_spans: Optional[List[Tuple[float, float]]] = None,  # Model event spans (SOURCE seconds) to carve out (respine trial DEC 6cc10fb7); None = no event stage
 ) -> Tuple[str, List[DecompSegment]]:  # (source_path, ordered aligned segments)
     """Decompose one source into aligned fine segments with per-transcriber variants.
 
@@ -249,6 +251,20 @@ async def decompose_source(
             if len(vad_chunks) != n_before:
                 logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s: "
                             f"sentence-split {n_before} -> {len(vad_chunks)} chunk(s)")
+
+        # Event-carve stage (respine trial DEC 6cc10fb7): model event spans
+        # become gaps between chunks (cut-don't-label). Spans arrive in SOURCE
+        # seconds; the skeleton is segment-local, so shift by seg_start before
+        # carving. Purely acoustic — no transcriber text is consulted; FA word
+        # times only apportion words across the cuts at fold time.
+        if event_spans:
+            local = [(s - seg_start, e - seg_start) for s, e in event_spans]
+            n_before = len(vad_chunks)
+            vad_chunks = carve_chunks_at_event_spans(
+                vad_chunks, local, min_chunk_s=cfg.split_min_chunk_s)
+            if len(vad_chunks) != n_before:
+                logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s: "
+                            f"event-carve {n_before} -> {len(vad_chunks)} chunk(s)")
 
         # Per-transcriber fold over the SHARED skeleton.
         per_t_segments: Dict[str, List[Any]] = {}
@@ -445,13 +461,31 @@ async def run_decomp(
     # the identity with THIS run's id (fresh spine, same config, DEC 9241564f).
     seg_config_hash = (str((manifest.capabilities.get(cfg.seg_capability) or {}).get("config_hash") or "")
                        if split_policy else "")
+    # Event-carve stage (respine trial DEC 6cc10fb7): the proposal set is
+    # consumed BY POINTER, once per run — its id joins the skeleton identity
+    # (the set IS the cut authority) and the pointer + id land in the manifest
+    # (propset -> skeleton chain, DEC 16159e09 manifest-kinds-chainable).
+    event_policy = EVENT_SPLIT_POLICY if cfg.event_split else None
+    event_spans: Optional[List[Tuple[float, float]]] = None
+    if cfg.event_split:
+        if not cfg.event_propset:
+            raise RuntimeError("event_split requires event_propset (the ProposalSetManifest pointer)")
+        propset_manifest, event_spans = event_spans_from_propset(cfg.event_propset, cfg.event_classes)
+        manifest.event_propset_id = str(propset_manifest.get("proposal_set_id") or "")
+        manifest.event_propset = str(cfg.event_propset)
+        logger.info(f"run {run_id}: event-carve consuming {manifest.event_propset_id} "
+                    f"({len(event_spans)} span(s) across classes {cfg.event_classes})")
     skeleton_config_hash = compute_skeleton_hash(
         vad_config_hash, split_policy=split_policy,
         split_min_chunk_s=cfg.split_min_chunk_s,
         seg_capability=cfg.seg_capability, seg_config_hash=seg_config_hash,
-        respine_token=run_id if cfg.respine else None)
+        respine_token=run_id if cfg.respine else None,
+        event_policy=event_policy,
+        event_propset_id=(manifest.event_propset_id if cfg.event_split else ""),
+        event_classes=(cfg.event_classes if cfg.event_split else None))
     manifest.skeleton_config_hash = skeleton_config_hash
     manifest.split_policy = split_policy
+    manifest.event_split_policy = event_policy
     # Pipeline writes append through to the graph db's SIDECAR journal (DEC ccbab9f5 /
     # finding 4219da27): unjournaled ingestion would erode db-rebuildability.
     graph_db_path = (manifest.capabilities.get(cfg.graph_capability) or {}).get("db_path")
@@ -471,7 +505,8 @@ async def run_decomp(
                     "re-run cjm-transcription-core with --graph-capability against this DB first")
 
             source_path, aligned = await decompose_source(
-                queue, cfg, source, i, transcribers, text_from)
+                queue, cfg, source, i, transcribers, text_from,
+                event_spans=event_spans)
             title = Path(source_path).stem or f"source-{i}"
 
             empty = sum(1 for a in aligned if not a.text.strip())
@@ -483,9 +518,12 @@ async def run_decomp(
                 status = "aborted"
                 break
 
+            # Node-metadata policy label (never identity): both refinement
+            # stages show up when both ran, e.g. "sentence-split/capability+event-carve/v1".
+            policy_label = "+".join(p for p in (split_policy, event_policy) if p) or None
             nodes, edges, ids = build_extension_payload(
                 source, src_capabilities, skeleton_config_hash, text_from, aligned,
-                split_policy=split_policy)
+                split_policy=policy_label)
 
             if not confirm_seam("commit-review",
                                 [f"{title}: extending Source {ids['source'][:8]}… with "
@@ -588,16 +626,23 @@ def compute_skeleton_hash(
     seg_capability: str = "",             # Segmenter capability name (identity input when splitting, B.5)
     seg_config_hash: str = "",            # Segmenter effective-config hash (identity input when splitting)
     respine_token: Optional[str] = None,  # Distinct-spine token (--respine, DEC 9241564f); None = normal identity
+    event_policy: Optional[str] = None,   # Event-carve policy+version when the event stage ran (respine trial DEC 6cc10fb7)
+    event_propset_id: str = "",           # Consumed proposal-set id (the model-cut authority IS identity)
+    event_classes: Optional[List[str]] = None,  # Carving classes (identity input when carving)
 ) -> str:  # The skeleton-config hash every Segment id + skeleton_hash prop derive from
-    """Skeleton identity, pure (DEC f1024568 + 9241564f).
+    """Skeleton identity, pure (DEC f1024568 + 9241564f + 6cc10fb7).
 
     The raw VAD hash when no split stage runs (legacy-identical ids); a
     composite over {vad, split policy+params, segmenter identity} when
-    sentence-split is on. `respine_token` WIDENS whichever identity applies:
-    same config, FRESH spine, as a deliberate act — the minted hash can never
-    collide with the config-identical spine (the e8458f6e post-upgrade
-    verify-collide), and the token (the decomp run id) keeps the re-spine
-    provenance-visible in the manifest."""
+    sentence-split is on. The event-carve stage stacks its OWN composite
+    {policy tag, propset id, carve classes, min-chunk guard} on top — the
+    proposal set is the cut authority, so two spines carved from different
+    sets (or different classes of the same set) can never share node ids.
+    `respine_token` WIDENS whichever identity applies: same config, FRESH
+    spine, as a deliberate act — the minted hash can never collide with the
+    config-identical spine (the e8458f6e post-upgrade verify-collide), and
+    the token (the decomp run id) keeps the re-spine provenance-visible in
+    the manifest."""
     h = vad_config_hash
     if split_policy:
         h = compute_config_hash({
@@ -607,6 +652,49 @@ def compute_skeleton_hash(
             "seg_capability": seg_capability,
             "seg_config_hash": seg_config_hash,
         })
+    if event_policy:
+        h = compute_config_hash({
+            "base_skeleton_hash": h,
+            "event_policy": event_policy,
+            "event_propset_id": event_propset_id,
+            "event_classes": sorted(event_classes or []),
+            "split_min_chunk_s": split_min_chunk_s,
+        })
     if respine_token:
         h = compute_config_hash({"base_skeleton_hash": h, "respine": str(respine_token)})
     return h
+
+
+def event_spans_from_propset(
+    propset: Union[str, Path],   # ProposalSetManifest json (or its set directory) — the pointer
+    classes: List[str],          # Proposal classes that carve (labels outside this list are ignored)
+) -> Tuple[Dict[str, Any], List[Tuple[float, float]]]:  # (manifest dict, ordered source-time spans)
+    """Load a proposal set BY POINTER and select its carve spans (respine trial
+    DEC 6cc10fb7 — no new model-invocation machinery: full-file propose runs
+    are a separate, cheap step; decomp only ever consumes the durable set).
+
+    Spans come back in SOURCE seconds, ordered; `decompose_source` shifts them
+    segment-local per pipeline segment before carving."""
+    p = Path(propset)
+    if p.is_dir():
+        p = p / "manifest.json"
+    if not p.is_file():
+        raise RuntimeError(f"Event proposal set not found: {p}")
+    manifest = json.loads(p.read_text())
+    if manifest.get("format") != "cjm-capability-pyannote/proposal-set-manifest":
+        raise RuntimeError(
+            f"{p} is not a proposal-set manifest (format {manifest.get('format')!r})")
+    data_file = p.parent / str((manifest.get("files") or {}).get("proposals") or "proposals.jsonl")
+    wanted = set(classes)
+    spans: List[Tuple[float, float]] = []
+    for line in data_file.read_text().splitlines():
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if str(row.get("label")) not in wanted:
+            continue
+        s, e = float(row.get("start_time") or 0.0), float(row.get("end_time") or 0.0)
+        if e > s:
+            spans.append((s, e))
+    spans.sort()
+    return manifest, spans

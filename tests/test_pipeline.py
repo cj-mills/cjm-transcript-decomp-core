@@ -115,3 +115,61 @@ def test_compute_skeleton_hash_identity_and_respine():
                                seg_config_hash="seghash",
                                respine_token="decomp_run_1")
     assert rs not in (split, r1, vad)
+
+
+def test_event_carve_identity_and_propset_loading(tmp_path):
+    """Respine trial DEC 6cc10fb7: the event composite widens the skeleton
+    identity (propset id + classes are inputs), and event_spans_from_propset
+    consumes a set by pointer (dir or json), filtering to the carve classes."""
+    import json
+    from cjm_transcript_decomp_core.pipeline import compute_skeleton_hash, event_spans_from_propset
+
+    vad = "vadhash123"
+    ev = compute_skeleton_hash(vad, event_policy="event-carve/v1",
+                               event_propset_id="propset_a", event_classes=["inhale"])
+    assert ev != vad
+    assert ev == compute_skeleton_hash(vad, event_policy="event-carve/v1",
+                                       event_propset_id="propset_a", event_classes=["inhale"])
+    # Different set, different classes: different spines by construction.
+    assert ev != compute_skeleton_hash(vad, event_policy="event-carve/v1",
+                                       event_propset_id="propset_b", event_classes=["inhale"])
+    assert ev != compute_skeleton_hash(vad, event_policy="event-carve/v1",
+                                       event_propset_id="propset_a", event_classes=["inhale", "dead-air"])
+    # The event composite stacks on the sentence composite, and respine widens both.
+    split = compute_skeleton_hash(vad, split_policy="sentence-split/capability",
+                                  seg_capability="cjm-capability-pysbd", seg_config_hash="seghash")
+    both = compute_skeleton_hash(vad, split_policy="sentence-split/capability",
+                                 seg_capability="cjm-capability-pysbd", seg_config_hash="seghash",
+                                 event_policy="event-carve/v1", event_propset_id="propset_a",
+                                 event_classes=["inhale"])
+    assert both not in (vad, split, ev)
+    assert compute_skeleton_hash(vad, event_policy="event-carve/v1",
+                                 event_propset_id="propset_a", event_classes=["inhale"],
+                                 respine_token="run1") != ev
+
+    set_dir = tmp_path / "propset_test"
+    set_dir.mkdir()
+    (set_dir / "manifest.json").write_text(json.dumps({
+        "format": "cjm-capability-pyannote/proposal-set-manifest",
+        "proposal_set_id": "propset_test",
+        "files": {"proposals": "proposals.jsonl"},
+    }))
+    rows = [
+        {"proposal_id": "p1", "label": "inhale", "start_time": 5.0, "end_time": 5.4, "score": 0.9},
+        {"proposal_id": "p2", "label": "hesitation-marker", "start_time": 1.0, "end_time": 1.5, "score": 0.8},
+        {"proposal_id": "p3", "label": "inhale", "start_time": 2.0, "end_time": 2.3, "score": 0.7},
+        {"proposal_id": "p4", "label": "inhale", "start_time": 9.0, "end_time": 9.0, "score": 0.5},
+    ]
+    (set_dir / "proposals.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+
+    # Dir pointer: classes filter, ordering, and empty-span drop all hold.
+    manifest, spans = event_spans_from_propset(set_dir, ["inhale"])
+    assert manifest["proposal_set_id"] == "propset_test"
+    assert spans == [(2.0, 2.3), (5.0, 5.4)]
+    # Json pointer resolves the same set.
+    _, spans2 = event_spans_from_propset(set_dir / "manifest.json", ["inhale"])
+    assert spans2 == spans
+
+    import pytest
+    with pytest.raises(RuntimeError):
+        event_spans_from_propset(tmp_path / "missing", ["inhale"])

@@ -18,6 +18,12 @@ _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 # joins the skeleton-identity composite beside this tag.
 SENTENCE_SPLIT_POLICY = "sentence-split/capability"
 
+# Event-carve policy tag (respine trial DEC 6cc10fb7): versioned for the same
+# reason — it is a SKELETON IDENTITY input. 'v1' = cut-don't-label: model event
+# spans (a ProposalSetManifest consumed by pointer) become GAPS between chunks;
+# sliver pieces under the min-chunk guard are absorbed into the gap.
+EVENT_SPLIT_POLICY = "event-carve/v1"
+
 
 def _strip_punct(
     text: str,  # Text to normalize
@@ -255,3 +261,43 @@ def split_chunks_at_sentence_gaps(
     for i, c in enumerate(refined):
         c.index = i
     return refined
+
+
+def carve_chunks_at_event_spans(
+    vad_chunks: List[VADChunk],            # The VAD skeleton (segment-local times)
+    event_spans: List[Tuple[float, float]],  # Model event spans (segment-local times, ordered)
+    min_chunk_s: float = 0.5,              # Sliver guard — a piece shorter than this absorbs into the gap
+) -> List[VADChunk]:  # The carved skeleton, re-indexed (identical content when nothing overlaps)
+    """The event-carve stage (EVENT_SPLIT_POLICY, respine trial DEC 6cc10fb7):
+    cut-don't-label — every model event span becomes a GAP between chunks.
+
+    Runs on the VAD skeleton post-FA pre-fold, the same seat as
+    `split_chunks_at_sentence_gaps` but with ACOUSTIC authority: each event
+    span clipped to a chunk removes that interval from the chunk, so the
+    propose lane's later accepts stay pure gap-inserts into exactly these
+    gaps. A resulting piece shorter than `min_chunk_s` is ABSORBED into the
+    adjacent gap rather than kept (a rejected cut would re-embed the event
+    mid-chunk and resurrect the nudge tax; a VAD-edge sliver beside a detected
+    event is padding). A chunk fully covered by an event drops whole. Word
+    fidelity is safe by construction: `assign_words_to_chunks` sends words in
+    gaps to the nearest surviving chunk, so FA times only apportion words
+    across a cut — no text is lost."""
+    carved: List[VADChunk] = []
+    for chunk in vad_chunks:
+        overlapping = [(max(chunk.start_time, s), min(chunk.end_time, e))
+                       for s, e in event_spans
+                       if s < chunk.end_time and e > chunk.start_time]
+        pieces: List[Tuple[float, float]] = []
+        cursor = chunk.start_time
+        for s, e in sorted(overlapping):
+            if s > cursor:
+                pieces.append((cursor, s))
+            cursor = max(cursor, e)
+        if cursor < chunk.end_time:
+            pieces.append((cursor, chunk.end_time))
+        for ps, pe in pieces:
+            if pe - ps >= min_chunk_s or not overlapping:
+                carved.append(VADChunk(index=0, start_time=ps, end_time=pe))
+    for i, c in enumerate(carved):
+        c.index = i
+    return carved

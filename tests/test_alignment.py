@@ -192,3 +192,39 @@ def sent_spans(text, *sentences):
         spans.append((start, start + len(s)))
         pos = start + len(s)
     return spans
+
+
+def test_carve_chunks_at_event_spans():
+    """Respine trial DEC 6cc10fb7 (cut-don't-label): event spans become gaps;
+    slivers under the guard absorb into the gap; covered chunks drop whole;
+    span-free skeletons pass through untouched (chunk durations included)."""
+    from cjm_transcript_decomp_core.alignment import carve_chunks_at_event_spans
+    chunks = [VADChunk(0, 0.0, 10.0), VADChunk(1, 12.0, 13.0), VADChunk(2, 14.0, 14.3)]
+
+    # No spans: identity (even the 0.3s chunk survives — pass-through never drops).
+    out = carve_chunks_at_event_spans(chunks, [], min_chunk_s=0.5)
+    assert [(c.start_time, c.end_time) for c in out] == [(0.0, 10.0), (12.0, 13.0), (14.0, 14.3)]
+    assert [c.index for c in out] == [0, 1, 2]
+
+    # Mid-chunk event: carved into two pieces around the gap.
+    out = carve_chunks_at_event_spans(chunks, [(4.0, 4.6)], min_chunk_s=0.5)
+    assert [(c.start_time, c.end_time) for c in out] == [(0.0, 4.0), (4.6, 10.0), (12.0, 13.0), (14.0, 14.3)]
+    assert [c.index for c in out] == [0, 1, 2, 3]
+
+    # Edge event minting a sliver: the 0.2s left piece absorbs into the gap
+    # (never a rejected cut), the survivor keeps the remainder.
+    out = carve_chunks_at_event_spans(chunks, [(0.2, 0.9)], min_chunk_s=0.5)
+    assert (out[0].start_time, out[0].end_time) == (0.9, 10.0)
+    assert len(out) == 3
+
+    # Event covering a whole chunk: the chunk drops.
+    out = carve_chunks_at_event_spans(chunks, [(11.5, 13.2)], min_chunk_s=0.5)
+    assert [(c.start_time, c.end_time) for c in out] == [(0.0, 10.0), (14.0, 14.3)]
+
+    # Two close events: the sliver BETWEEN them absorbs, fusing one long gap.
+    out = carve_chunks_at_event_spans(chunks, [(3.0, 3.5), (3.8, 4.4)], min_chunk_s=0.5)
+    assert [(c.start_time, c.end_time) for c in out] == [(0.0, 3.0), (4.4, 10.0), (12.0, 13.0), (14.0, 14.3)]
+
+    # Straddling span (overlaps a chunk end into the silence): clipped per chunk.
+    out = carve_chunks_at_event_spans(chunks, [(9.5, 12.2)], min_chunk_s=0.5)
+    assert [(c.start_time, c.end_time) for c in out] == [(0.0, 9.5), (12.2, 13.0), (14.0, 14.3)]

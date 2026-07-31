@@ -68,6 +68,16 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                      help="Sentence-segmentation capability name (B.5; skipped with --no-sentence-split)")
     run.add_argument("--split-min-chunk-s", type=float, default=0.5,
                      help="Sentence-split min sub-chunk duration guard, seconds (identity input)")
+    run.add_argument("--event-split", action="store_true",
+                     help="Run the post-FA event-carve stage (respine trial DEC 6cc10fb7): model "
+                          "event spans from --event-propset become gaps between chunks "
+                          "(cut-don't-label); typically paired with --no-sentence-split")
+    run.add_argument("--event-propset", default=None,
+                     help="ProposalSetManifest pointer (manifest json or its set dir); "
+                          "REQUIRED with --event-split")
+    run.add_argument("--event-classes", nargs="+", default=["inhale"],
+                     help="Proposal classes that carve (default: inhale; word-bearing "
+                          "classes must never cut)")
     run.add_argument("--respine", action="store_true",
                      help="Mint a FRESH skeleton spine under the SAME config (DEC 9241564f): "
                           "the run id joins the Segment identity input, so the new spine "
@@ -151,7 +161,12 @@ async def run_command(
         split_min_chunk_s=args.split_min_chunk_s,
         seg_capability=args.seg_capability,
         respine=args.respine,
+        event_split=args.event_split,
+        event_propset=(args.event_propset or ""),
+        event_classes=list(args.event_classes),
     )
+    if cfg.event_split and not cfg.event_propset:
+        raise SystemExit("error: --event-split requires --event-propset")
 
     # CR-7 GPU subtree attribution is opt-in: --sysmon-capability threads the monitor
     # name into BOTH the manager and the queue; the monitor loads FIRST so GPU

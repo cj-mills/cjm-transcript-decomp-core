@@ -38,9 +38,11 @@ def test_manifest_shape_and_run_id():
     m = DecompManifest(run_id="r", created_at=0.0, config={}, source_manifest="/tmp/s.json")
     md = m.to_dict()
     assert md["format"] == "cjm-transcript-decomp-core/run-manifest"
-    assert md["version"] == "0.2.3" and md["sources"] == []
+    assert md["version"] == "0.2.4" and md["sources"] == []
     # 0.2.2: skeleton identity rides the manifest (empty/None until run_decomp fills them)
     assert md["skeleton_config_hash"] == "" and md["split_policy"] is None
+    # 0.2.4: event-carve chain fields (empty/None until an event_split run fills them)
+    assert md["event_split_policy"] is None and md["event_propset_id"] == "" and md["event_propset"] == ""
     rec = DecompSourceRecord(source_node_id="sid", source_path="/a.mp3", title="a",
                              segment_count=2, segment_ids=["s1", "s2"])
     assert rec.to_dict()["source_node_id"] == "sid"
