@@ -209,6 +209,14 @@ async def run_command(
             except Exception as e:  # One member's failure must not sink the batch
                 logger.error(f"decomp failed for {mp}: {e}")
                 print(f"FAILED {mp}: {e}")
+                if "content-hash mismatch" in str(e):
+                    # The extend guard refusing an id collision with an existing
+                    # spine (finding e8458f6e class): same skeleton identity,
+                    # different provenance. The deliberate way out is a fresh
+                    # spine (DEC 9241564f).
+                    print("HINT: an existing spine already owns these node ids "
+                          "with different provenance — re-run with --respine to "
+                          "mint a FRESH coexisting spine (DEC 9241564f)")
                 all_ok = False
                 continue
             out = (Path(args.output) if args.output

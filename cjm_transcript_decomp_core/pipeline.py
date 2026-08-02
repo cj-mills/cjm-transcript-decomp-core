@@ -482,7 +482,9 @@ async def run_decomp(
         respine_token=run_id if cfg.respine else None,
         event_policy=event_policy,
         event_propset_id=(manifest.event_propset_id if cfg.event_split else ""),
-        event_classes=(cfg.event_classes if cfg.event_split else None))
+        event_classes=(cfg.event_classes if cfg.event_split else None),
+        text_from_capability=str(text_from or ""),
+        text_from_config_hash=str((src_capabilities.get(text_from) or {}).get("config_hash") or ""))
     manifest.skeleton_config_hash = skeleton_config_hash
     manifest.split_policy = split_policy
     manifest.event_split_policy = event_policy
@@ -629,6 +631,8 @@ def compute_skeleton_hash(
     event_policy: Optional[str] = None,   # Event-carve policy+version when the event stage ran (respine trial DEC 6cc10fb7)
     event_propset_id: str = "",           # Consumed proposal-set id (the model-cut authority IS identity)
     event_classes: Optional[List[str]] = None,  # Carving classes (identity input when carving)
+    text_from_capability: str = "",       # Authoritative transcriber name (text-authority identity, DEC a6e4c040)
+    text_from_config_hash: str = "",      # Its effective-config hash (identity input with text_from_capability)
 ) -> str:  # The skeleton-config hash every Segment id + skeleton_hash prop derive from
     """Skeleton identity, pure (DEC f1024568 + 9241564f + 6cc10fb7).
 
@@ -659,6 +663,19 @@ def compute_skeleton_hash(
             "event_propset_id": event_propset_id,
             "event_classes": sorted(event_classes or []),
             "split_min_chunk_s": split_min_chunk_s,
+        })
+    if text_from_capability:
+        # Text-authority identity (DEC a6e4c040, user-ratified 2026-08-01):
+        # segments CARRY the authoritative text, so the transcriber that wrote
+        # it joins the identity — a re-transcription under a changed transcriber
+        # config (the verbatim-prompt case) mints a SIBLING spine instead of
+        # colliding into the extend guard's sources content-hash refusal.
+        # Config-hash, not content-hash — uniform with every other identity
+        # input; a same-config nondeterministic re-run stays --respine's job.
+        h = compute_config_hash({
+            "base_skeleton_hash": h,
+            "text_from": text_from_capability,
+            "text_from_config_hash": text_from_config_hash,
         })
     if respine_token:
         h = compute_config_hash({"base_skeleton_hash": h, "respine": str(respine_token)})
@@ -692,6 +709,12 @@ def event_spans_from_propset(
             continue
         row = json.loads(line)
         if str(row.get("label")) not in wanted:
+            continue
+        if int(row.get("tier", 1)) != 1:
+            # Dual-tier sets (propset manifest 0.2.0, 3a5cb858 shape A): only
+            # the operating-point tier carves — the audition tier exists for
+            # the correction lane and must NEVER cut the spine. Tierless rows
+            # are legacy single-tier sets and carve as before.
             continue
         s, e = float(row.get("start_time") or 0.0), float(row.get("end_time") or 0.0)
         if e > s:

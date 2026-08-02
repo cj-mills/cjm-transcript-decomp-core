@@ -115,6 +115,21 @@ def test_compute_skeleton_hash_identity_and_respine():
                                seg_config_hash="seghash",
                                respine_token="decomp_run_1")
     assert rs not in (split, r1, vad)
+    # DEC a6e4c040: the TEXT AUTHORITY joins the identity — a transcriber
+    # config change (the verbatim-prompt case) mints a sibling spine instead
+    # of colliding; same transcriber config converges; respine still stacks
+    # OUTSIDE it (the deliberate widening stays outermost).
+    t1 = compute_skeleton_hash(vad, text_from_capability="voxtral",
+                               text_from_config_hash="cfg_A")
+    t2 = compute_skeleton_hash(vad, text_from_capability="voxtral",
+                               text_from_config_hash="cfg_B")
+    assert t1 != vad and t2 != vad and t1 != t2
+    assert t1 == compute_skeleton_hash(vad, text_from_capability="voxtral",
+                                       text_from_config_hash="cfg_A")
+    tr = compute_skeleton_hash(vad, text_from_capability="voxtral",
+                               text_from_config_hash="cfg_A",
+                               respine_token="decomp_run_1")
+    assert tr not in (t1, r1, vad)
 
 
 def test_event_carve_identity_and_propset_loading(tmp_path):
@@ -159,13 +174,19 @@ def test_event_carve_identity_and_propset_loading(tmp_path):
         {"proposal_id": "p2", "label": "hesitation-marker", "start_time": 1.0, "end_time": 1.5, "score": 0.8},
         {"proposal_id": "p3", "label": "inhale", "start_time": 2.0, "end_time": 2.3, "score": 0.7},
         {"proposal_id": "p4", "label": "inhale", "start_time": 9.0, "end_time": 9.0, "score": 0.5},
+        # Dual-tier set (propset manifest 0.2.0): the audition tier must NEVER
+        # carve; an explicit tier-1 tag carves like the legacy tierless rows.
+        {"proposal_id": "p5", "label": "inhale", "start_time": 7.0, "end_time": 7.3,
+         "score": 0.42, "tier": 2},
+        {"proposal_id": "p6", "label": "inhale", "start_time": 3.0, "end_time": 3.2,
+         "score": 0.8, "tier": 1},
     ]
     (set_dir / "proposals.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 
-    # Dir pointer: classes filter, ordering, and empty-span drop all hold.
+    # Dir pointer: classes filter, tier filter, ordering, empty-span drop all hold.
     manifest, spans = event_spans_from_propset(set_dir, ["inhale"])
     assert manifest["proposal_set_id"] == "propset_test"
-    assert spans == [(2.0, 2.3), (5.0, 5.4)]
+    assert spans == [(2.0, 2.3), (3.0, 3.2), (5.0, 5.4)]
     # Json pointer resolves the same set.
     _, spans2 = event_spans_from_propset(set_dir / "manifest.json", ["inhale"])
     assert spans2 == spans
