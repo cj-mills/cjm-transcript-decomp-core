@@ -124,6 +124,7 @@ class DecompConfig:
     event_split: bool = False       # Run the post-FA event-carve stage (respine trial DEC 6cc10fb7): model event spans from `event_propset` become gaps between chunks (cut-don't-label); composable with sentence_split, but the trial runs it INSTEAD
     event_propset: str = ""         # ProposalSetManifest pointer (manifest json or its set dir) — the model-cut authority consumed BY POINTER; REQUIRED when event_split
     event_classes: List[str] = field(default_factory=lambda: ["inhale"])  # Proposal classes that carve (word-bearing classes like hesitation-marker must never cut)
+    word_rescue: bool = True        # Run the post-carve word-rescue stage (96edc646 verdict bc7ece7b): authoritative FA words stranded outside every chunk get chunks minted — DEFAULT-ON (mis-homing is silent data corruption; opting out hides it)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict snapshot for the manifest
         """Serialize to a plain dict."""
@@ -163,11 +164,12 @@ class DecompManifest:
     skeleton_config_hash: str = ""      # Segment identity input (0.2.2): VAD config hash, or the composite when a split stage ran
     split_policy: Optional[str] = None  # Split policy+version that refined this run's skeleton (None = raw VAD)
     event_split_policy: Optional[str] = None  # Event-carve policy+version when the event stage ran (0.2.4; None = no event carve)
+    word_rescue_policy: Optional[str] = None  # Word-rescue policy+version when the rescue stage ran (0.2.5; None = no rescue)
     event_propset_id: str = ""          # Consumed ProposalSetManifest id (0.2.4; the propset -> skeleton chain join key)
     event_propset: str = ""             # Recorded path of the consumed ProposalSetManifest (0.2.4; the pointer)
 
     FORMAT: str = field(default="cjm-transcript-decomp-core/run-manifest", repr=False)  # Format tag
-    VERSION: str = field(default="0.2.4", repr=False)                                   # Schema version (0.2.4: event-carve respine — propset pointer + id + event policy recorded; 0.2.3: capability-driven sentence split)
+    VERSION: str = field(default="0.2.5", repr=False)                                   # Schema version (0.2.5: word-rescue policy recorded; 0.2.4: event-carve respine — propset pointer + id + event policy recorded; 0.2.3: capability-driven sentence split)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form for JSON serialization
         """Serialize to a plain dict with nested sources."""
@@ -184,6 +186,7 @@ class DecompManifest:
             "skeleton_config_hash": self.skeleton_config_hash,
             "split_policy": self.split_policy,
             "event_split_policy": self.event_split_policy,
+            "word_rescue_policy": self.word_rescue_policy,
             "event_propset_id": self.event_propset_id,
             "event_propset": self.event_propset,
             "sources": [s.to_dict() for s in self.sources],

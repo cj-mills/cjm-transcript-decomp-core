@@ -228,3 +228,78 @@ def test_carve_chunks_at_event_spans():
     # Straddling span (overlaps a chunk end into the silence): clipped per chunk.
     out = carve_chunks_at_event_spans(chunks, [(9.5, 12.2)], min_chunk_s=0.5)
     assert [(c.start_time, c.end_time) for c in out] == [(0.0, 9.5), (12.2, 13.0), (14.0, 14.3)]
+
+
+def test_rescue_gap_words():
+    """96edc646 verdict bc7ece7b: chunks derive from VAD ∪ FA-word-coverage.
+    M1 (carve-absorbed sliver words) and M2 (VAD-gap words) both get chunks
+    minted; covered words are no-ops; rescued chunks clip to free intervals
+    (never overlapping chunks or event spans); close words join one chunk."""
+    from cjm_transcript_decomp_core.alignment import rescue_gap_words
+    chunks = [VADChunk(0, 0.0, 10.0), VADChunk(1, 12.0, 14.0)]
+
+    # Fully covered words: identity (no rescue chunks minted).
+    words = [FAWord("hi", 1.0, 1.4), FAWord("there", 12.5, 12.9)]
+    out = rescue_gap_words(chunks, words)
+    assert [(c.start_time, c.end_time) for c in out] == [(0.0, 10.0), (12.0, 14.0)]
+
+    # M2: a word in the VAD gap gets a padded chunk; indices re-derive.
+    out = rescue_gap_words(chunks, [FAWord("Now", 10.8, 11.2)])
+    assert [(round(c.start_time, 2), round(c.end_time, 2)) for c in out] == [
+        (0.0, 10.0), (10.75, 11.25), (12.0, 14.0)]
+    assert [c.index for c in out] == [0, 1, 2]
+
+    # M1 shape: gap word between two event spans — the minted chunk clips to
+    # the inter-event free interval, and the min-chunk guard does NOT apply.
+    ev = [(10.2, 10.7), (11.3, 11.8)]
+    out = rescue_gap_words(chunks, [FAWord("Um", 10.72, 11.28)], event_spans=ev)
+    assert [(round(c.start_time, 2), round(c.end_time, 2)) for c in out] == [
+        (0.0, 10.0), (10.7, 11.3), (12.0, 14.0)]
+
+    # A word FULLY inside an event span stays unrescued (true FA drift must
+    # not re-embed a verified event).
+    out = rescue_gap_words(chunks, [FAWord("x", 10.3, 10.6)], event_spans=ev)
+    assert [(c.start_time, c.end_time) for c in out] == [(0.0, 10.0), (12.0, 14.0)]
+
+    # v2: an edge-straddling word rescues its UNCOVERED poke-out — the piece
+    # before the span it drifts into ('individuals' 287.18 vs inhale 287.25).
+    out = rescue_gap_words(chunks, [FAWord("individuals", 10.9, 11.5)],
+                           event_spans=[(11.3, 11.8)])
+    assert [(round(c.start_time, 2), round(c.end_time, 2)) for c in out] == [
+        (0.0, 10.0), (10.85, 11.3), (12.0, 14.0)]
+
+    # v2: a sub-jitter poke-out (< min piece) contributes nothing.
+    out = rescue_gap_words(chunks, [FAWord("y", 11.28, 11.5)],
+                           event_spans=[(11.3, 11.8)])
+    assert len(out) == 2
+
+    # Close gap words join one rescued chunk; a far one gets its own.
+    out = rescue_gap_words(chunks, [FAWord("a", 14.5, 14.7), FAWord("b", 14.9, 15.1),
+                                    FAWord("c", 17.0, 17.2)])
+    assert [(round(c.start_time, 2), round(c.end_time, 2)) for c in out] == [
+        (0.0, 10.0), (12.0, 14.0), (14.45, 15.15), (16.95, 17.25)]
+
+    # Zero-duration FA words never seed a rescue.
+    out = rescue_gap_words(chunks, [FAWord("z", 11.0, 11.0)])
+    assert len(out) == 2
+
+    # v5: a boundary-clipped word (real overlap in an existing chunk) mints
+    # nothing — the argmax-overlap fold already homes it; its poke-out would
+    # just be an empty sliver segment.
+    out = rescue_gap_words(chunks, [FAWord("stop", 11.9, 12.4)])
+    assert len(out) == 2
+
+
+def test_assign_uncontained_word_prefers_overlap():
+    """v3 fold rule (96edc646): a word whose start drifted into a carved event
+    span homes into the chunk holding MOST of its audio — the rescued
+    poke-out — not whichever chunk edge sits nearer; zero-overlap words keep
+    the nearest-edge fallback."""
+    # 'because' shape: prev chunk ends 10.0 (0.02 from word start), rescued
+    # poke-out [10.22, 10.35] holds the word's body.
+    chunks = [VADChunk(0, 0.0, 10.0), VADChunk(1, 10.22, 10.35), VADChunk(2, 12.0, 14.0)]
+    assert assign_words_to_chunks([FAWord("because", 10.02, 10.34)], chunks) == [1]
+    # Zero overlap anywhere: nearest edge still wins.
+    assert assign_words_to_chunks([FAWord("hm", 11.0, 11.1)], chunks) == [1]
+    # Contained start: unchanged half-open containment.
+    assert assign_words_to_chunks([FAWord("hi", 0.5, 0.9)], chunks) == [0]

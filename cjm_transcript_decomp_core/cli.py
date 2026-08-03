@@ -68,6 +68,12 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                      help="Sentence-segmentation capability name (B.5; skipped with --no-sentence-split)")
     run.add_argument("--split-min-chunk-s", type=float, default=0.5,
                      help="Sentence-split min sub-chunk duration guard, seconds (identity input)")
+    run.add_argument("--word-rescue", action=argparse.BooleanOptionalAction, default=True,
+                     help="Run the post-carve word-rescue stage (96edc646 verdict bc7ece7b): "
+                          "authoritative FA words stranded outside every chunk — carve-sliver "
+                          "absorption or VAD-missed speech in gaps — get chunks minted so "
+                          "text homes where its audio is. DEFAULT-ON (mis-homing is silent "
+                          "data corruption); --no-word-rescue opts out")
     run.add_argument("--event-split", action="store_true",
                      help="Run the post-FA event-carve stage (respine trial DEC 6cc10fb7): model "
                           "event spans from --event-propset become gaps between chunks "
@@ -164,6 +170,7 @@ async def run_command(
         event_split=args.event_split,
         event_propset=(args.event_propset or ""),
         event_classes=list(args.event_classes),
+        word_rescue=args.word_rescue,
     )
     if cfg.event_split and not cfg.event_propset:
         raise SystemExit("error: --event-split requires --event-propset")

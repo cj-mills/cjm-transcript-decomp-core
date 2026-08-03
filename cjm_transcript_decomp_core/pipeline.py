@@ -22,10 +22,10 @@ from cjm_substrate.core.workspace import resolve_recorded_tree
 from cjm_transcript_decomp_core.alignment import (assign_words_to_chunks,
                                                   build_segments_from_alignment,
                                                   carve_chunks_at_event_spans, EVENT_SPLIT_POLICY,
-                                                  map_fa_words_to_text, sentence_end_word_indices,
-                                                  SENTENCE_SPLIT_POLICY,
+                                                  map_fa_words_to_text, rescue_gap_words,
+                                                  sentence_end_word_indices, SENTENCE_SPLIT_POLICY,
                                                   split_chunks_at_sentence_gaps,
-                                                  tier1_alignment_checks)
+                                                  tier1_alignment_checks, WORD_RESCUE_POLICY)
 from cjm_transcript_decomp_core.graph import (build_extension_payload, resolve_root_ids,
                                               verify_source)
 from cjm_transcript_decomp_core.models import (DecompConfig, DecompManifest, DecompSegment,
@@ -266,6 +266,21 @@ async def decompose_source(
                 logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s: "
                             f"event-carve {n_before} -> {len(vad_chunks)} chunk(s)")
 
+        # Word-rescue stage (96edc646 verdict bc7ece7b): chunks derive from
+        # VAD ∪ FA-word-coverage. Authoritative words stranded outside every
+        # chunk (carve-sliver absorption OR VAD-missed speech in gaps) get
+        # chunks minted for them BEFORE the fold, so assign_words_to_chunks
+        # homes them correctly instead of gluing them to the nearest chunk.
+        if cfg.word_rescue and text_from in per_t_words:
+            local_ev = ([(s - seg_start, e - seg_start) for s, e in event_spans]
+                        if event_spans else None)
+            n_before = len(vad_chunks)
+            vad_chunks = rescue_gap_words(vad_chunks, per_t_words[text_from],
+                                          event_spans=local_ev)
+            if len(vad_chunks) != n_before:
+                logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s: "
+                            f"word-rescue {n_before} -> {len(vad_chunks)} chunk(s)")
+
         # Per-transcriber fold over the SHARED skeleton.
         per_t_segments: Dict[str, List[Any]] = {}
         for t in m["fa_nodes"]:
@@ -475,6 +490,7 @@ async def run_decomp(
         manifest.event_propset = str(cfg.event_propset)
         logger.info(f"run {run_id}: event-carve consuming {manifest.event_propset_id} "
                     f"({len(event_spans)} span(s) across classes {cfg.event_classes})")
+    word_rescue_policy = WORD_RESCUE_POLICY if cfg.word_rescue else None
     skeleton_config_hash = compute_skeleton_hash(
         vad_config_hash, split_policy=split_policy,
         split_min_chunk_s=cfg.split_min_chunk_s,
@@ -484,10 +500,12 @@ async def run_decomp(
         event_propset_id=(manifest.event_propset_id if cfg.event_split else ""),
         event_classes=(cfg.event_classes if cfg.event_split else None),
         text_from_capability=str(text_from or ""),
-        text_from_config_hash=str((src_capabilities.get(text_from) or {}).get("config_hash") or ""))
+        text_from_config_hash=str((src_capabilities.get(text_from) or {}).get("config_hash") or ""),
+        word_rescue_policy=word_rescue_policy)
     manifest.skeleton_config_hash = skeleton_config_hash
     manifest.split_policy = split_policy
     manifest.event_split_policy = event_policy
+    manifest.word_rescue_policy = word_rescue_policy
     # Pipeline writes append through to the graph db's SIDECAR journal (DEC ccbab9f5 /
     # finding 4219da27): unjournaled ingestion would erode db-rebuildability.
     graph_db_path = (manifest.capabilities.get(cfg.graph_capability) or {}).get("db_path")
@@ -522,7 +540,8 @@ async def run_decomp(
 
             # Node-metadata policy label (never identity): both refinement
             # stages show up when both ran, e.g. "sentence-split/capability+event-carve/v1".
-            policy_label = "+".join(p for p in (split_policy, event_policy) if p) or None
+            policy_label = "+".join(
+                p for p in (split_policy, event_policy, word_rescue_policy) if p) or None
             nodes, edges, ids = build_extension_payload(
                 source, src_capabilities, skeleton_config_hash, text_from, aligned,
                 split_policy=policy_label)
@@ -633,6 +652,7 @@ def compute_skeleton_hash(
     event_classes: Optional[List[str]] = None,  # Carving classes (identity input when carving)
     text_from_capability: str = "",       # Authoritative transcriber name (text-authority identity, DEC a6e4c040)
     text_from_config_hash: str = "",      # Its effective-config hash (identity input with text_from_capability)
+    word_rescue_policy: Optional[str] = None,  # Word-rescue policy+version when the rescue stage ran (96edc646 verdict bc7ece7b)
 ) -> str:  # The skeleton-config hash every Segment id + skeleton_hash prop derive from
     """Skeleton identity, pure (DEC f1024568 + 9241564f + 6cc10fb7).
 
@@ -663,6 +683,14 @@ def compute_skeleton_hash(
             "event_propset_id": event_propset_id,
             "event_classes": sorted(event_classes or []),
             "split_min_chunk_s": split_min_chunk_s,
+        })
+    if word_rescue_policy:
+        # Word-rescue identity (96edc646 verdict bc7ece7b): rescued chunks are
+        # skeleton structure, so the rescue policy joins the identity — a spine
+        # with rescue on can never share node ids with one without.
+        h = compute_config_hash({
+            "base_skeleton_hash": h,
+            "word_rescue_policy": word_rescue_policy,
         })
     if text_from_capability:
         # Text-authority identity (DEC a6e4c040, user-ratified 2026-08-01):

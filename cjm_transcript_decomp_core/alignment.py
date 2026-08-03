@@ -24,6 +24,35 @@ SENTENCE_SPLIT_POLICY = "sentence-split/capability"
 # sliver pieces under the min-chunk guard are absorbed into the gap.
 EVENT_SPLIT_POLICY = "event-carve/v1"
 
+# Word-rescue policy tag (96edc646 verdict bc7ece7b): a SKELETON IDENTITY
+# input like the other stage tags. 'v2' = FA-word authority over chunk
+# coverage: an authoritative-transcriber word whose START no chunk contains
+# (the fold's own assignment test) seeds rescue from its UNCOVERED PIECES —
+# the word interval minus chunks ∪ event spans — so an edge-straddling word
+# rescues its poke-out while a word FULLY inside a verified event span stays
+# unrescued (true FA drift). Pieces group per free interval, padded, clipped;
+# the min-chunk guard does NOT apply — rescue exists precisely to keep speech
+# the guard or VAD dropped. ('v1' seeded on word midpoints and skipped any
+# word whose midpoint fell inside an event span — it stranded edge-straddlers;
+# one v1 spine exists and is superseded.) Pad/join/min-piece are
+# version-bound: changing them bumps the tag.
+# 'v4' makes the FOLD pure argmax-overlap (assign_words_to_chunks): a word
+# homes into the chunk holding the most of its audio; start-containment and
+# nearest-edge survive only as the zero-overlap fallback. Overlap subsumes
+# half-open containment for the boundary case, and kills the last mis-homing
+# channel: a word start-captured by a whisker of the WRONG chunk while its
+# body sits in a rescued poke-out. (v3 preferred overlap only for uncontained
+# words; v2 seeded rescue from uncovered pieces but kept nearest-edge
+# assignment; one spine of each exists, both superseded.)
+# 'v5' narrows the SEED rule to HOMELESS words only (max overlap with every
+# existing chunk < min-piece): a boundary-clipped word is already homed by
+# the argmax-overlap fold, and minting its poke-out littered v4 spines with
+# hundreds of tiny empty sliver segments. Fold unchanged from v4.
+WORD_RESCUE_POLICY = "word-rescue/v5"
+WORD_RESCUE_PAD_S = 0.05        # Minted-chunk padding around each rescued piece group (seconds)
+WORD_RESCUE_JOIN_GAP_S = 0.5    # Pieces closer than this join one rescued chunk (seconds)
+WORD_RESCUE_MIN_PIECE_S = 0.03  # Uncovered piece shorter than this = FA jitter, not speech
+
 
 def _strip_punct(
     text: str,  # Text to normalize
@@ -105,13 +134,17 @@ def assign_words_to_chunks(
 ) -> List[int]:  # Chunk index for each FA word
     """Assign each FA word to a VAD chunk by timestamp overlap.
 
-    Words whose start_time falls within a chunk's [start, end) are assigned to
-    that chunk — HALF-OPEN, so a word starting exactly on a shared boundary
-    belongs to the chunk that STARTS there (sentence-split cuts land exactly on
-    the next word's start when FA words are contiguous; the old inclusive end
-    pulled that word one chunk LEFT — the off-by-one the 2026-07-22 probe drive
-    caught). Words in silence gaps (incl. exactly at the last chunk's end) go
-    to the nearest chunk by time proximity.
+    A word homes into the chunk holding the MOST of its audio (word-rescue/v4
+    fold rule, 96edc646 verdict bc7ece7b): argmax overlap over [start, end] ∩
+    chunk. Overlap subsumes the old half-open start-containment — a word
+    starting exactly on a shared boundary lies fully in the chunk that STARTS
+    there (the sentence-split contiguity case the 2026-07-22 probe drive
+    pinned), and a word whose FA start clips the END of the wrong chunk by a
+    whisker no longer gets start-captured there while its body sits in the
+    next chunk or a rescued poke-out. Ties keep the earlier chunk. Only a
+    word overlapping nothing at all (fully inside a carved event span, or
+    zero-duration) falls back — containment of its start first, then
+    nearest-edge proximity.
     """
     if not vad_chunks:
         return [0] * len(fa_items)
@@ -120,15 +153,22 @@ def assign_words_to_chunks(
     for item in fa_items:
         t = item.start_time
         best_idx = 0
-        best_dist = float("inf")
+        best_overlap = 0.0
         for i, chunk in enumerate(vad_chunks):
-            if chunk.start_time <= t < chunk.end_time:
+            overlap = min(item.end_time, chunk.end_time) - max(t, chunk.start_time)
+            if overlap > best_overlap:
+                best_overlap = overlap
                 best_idx = i
-                break
-            dist = min(abs(t - chunk.start_time), abs(t - chunk.end_time))
-            if dist < best_dist:
-                best_dist = dist
-                best_idx = i
+        if best_overlap <= 0.0:
+            best_dist = float("inf")
+            for i, chunk in enumerate(vad_chunks):
+                if chunk.start_time <= t < chunk.end_time:
+                    best_idx = i
+                    break
+                dist = min(abs(t - chunk.start_time), abs(t - chunk.end_time))
+                if dist < best_dist:
+                    best_dist = dist
+                    best_idx = i
         assignments.append(best_idx)
     return assignments
 
@@ -301,3 +341,102 @@ def carve_chunks_at_event_spans(
     for i, c in enumerate(carved):
         c.index = i
     return carved
+
+
+def rescue_gap_words(
+    vad_chunks: List[VADChunk],              # The chunk skeleton post split/carve (segment-local times)
+    fa_words: List[FAWord],                  # AUTHORITATIVE transcriber's FA words (segment-local times)
+    event_spans: Optional[List[Tuple[float, float]]] = None,  # Carved event spans (segment-local; rescued chunks never overlap them)
+    pad_s: float = WORD_RESCUE_PAD_S,        # Padding around each rescued word group
+    join_gap_s: float = WORD_RESCUE_JOIN_GAP_S,  # Words closer than this share one rescued chunk
+) -> List[VADChunk]:  # The skeleton + minted rescue chunks, merged, re-indexed
+    """The word-rescue stage (WORD_RESCUE_POLICY, 96edc646 verdict bc7ece7b):
+    chunks derive from VAD ∪ FA-word-coverage, not VAD alone.
+
+    Two mechanisms strand real speech outside every chunk — the carve's sliver
+    guard absorbs sub-min_chunk_s pieces (M1), and VAD misses short/soft
+    speech in inter-chunk gaps entirely (M2). `assign_words_to_chunks` then
+    sends those words to the NEAREST chunk: text survives but mis-homed into a
+    chunk whose audio does not contain it. This stage closes both at one seat
+    (v2 semantics — see WORD_RESCUE_POLICY): a word the fold cannot home (no
+    chunk contains its start) seeds rescue from its UNCOVERED PIECES — the
+    word interval minus chunks ∪ event spans — so an edge-straddling word
+    rescues its poke-out while a word FULLY inside a human-verified event span
+    contributes nothing (true FA drift). Piece groups become minted chunks —
+    padded, clipped so rescued chunks never overlap existing chunks or event
+    spans. The min-chunk guard deliberately does NOT apply: rescue exists to
+    keep exactly the speech the guard or VAD dropped. Runs post-carve pre-fold
+    on the authoritative transcriber's words only (words = text authority;
+    every transcriber re-folds over the same rescued skeleton)."""
+    # Free intervals = the timeline complement of chunks ∪ event spans.
+    blocks = sorted([(c.start_time, c.end_time) for c in vad_chunks]
+                    + [(s, e) for s, e in (event_spans or [])])
+    merged: List[Tuple[float, float]] = []
+    for s, e in blocks:
+        if merged and s <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], e))
+        else:
+            merged.append((s, e))
+
+    def free_interval(t: float) -> Optional[Tuple[float, float]]:
+        lo, hi = float("-inf"), float("inf")
+        for s, e in merged:
+            if s <= t <= e:
+                return None
+            if e < t:
+                lo = max(lo, e)
+            elif s > t:
+                hi = min(hi, s)
+                break
+        return (lo, hi)
+
+    # v2 seed rule: a word the fold cannot home (no chunk contains its START,
+    # the fold's own half-open test) contributes its UNCOVERED PIECES — the
+    # word interval minus every block. An edge-straddling word rescues its
+    # poke-out; a word fully inside a verified event span contributes nothing
+    # (true FA drift). Sub-jitter pieces are noise, not speech.
+    pieces: List[Tuple[float, float]] = []
+    for w in sorted(fa_words, key=lambda w: w.start_time):
+        if w.end_time <= w.start_time:
+            continue
+        # v5 seed rule: only HOMELESS words rescue — a word with real overlap
+        # in some existing chunk is already homed by the argmax-overlap fold;
+        # minting its poke-out would litter the spine with empty slivers
+        # (v4 minted 360 tiny empty segments on source-1 doing exactly that).
+        if max((min(w.end_time, c.end_time) - max(w.start_time, c.start_time)
+                for c in vad_chunks), default=0.0) >= WORD_RESCUE_MIN_PIECE_S:
+            continue
+        cursor = w.start_time
+        for s, e in merged:
+            if e <= cursor:
+                continue
+            if s >= w.end_time:
+                break
+            if s > cursor:
+                pieces.append((cursor, min(s, w.end_time)))
+            cursor = max(cursor, e)
+        if cursor < w.end_time:
+            pieces.append((cursor, w.end_time))
+    pieces = sorted(p for p in pieces if p[1] - p[0] >= WORD_RESCUE_MIN_PIECE_S)
+
+    rescued: List[VADChunk] = []
+    last_fi: Optional[Tuple[float, float]] = None
+    for ps, pe in pieces:
+        fi = free_interval((ps + pe) / 2)
+        if fi is None:  # Defensive: a piece is inside a free interval by construction
+            continue
+        if (rescued and fi == last_fi
+                and ps - rescued[-1].end_time <= join_gap_s + pad_s):
+            rescued[-1].end_time = max(rescued[-1].end_time, min(pe + pad_s, fi[1]))
+        else:
+            # Clamp at 0: a piece at the pipeline-segment head minus pad must
+            # not mint a negative-start chunk (TimeSlice refuses it).
+            rescued.append(VADChunk(index=0,
+                                    start_time=max(ps - pad_s, fi[0], 0.0),
+                                    end_time=min(pe + pad_s, fi[1])))
+        last_fi = fi
+    out = list(vad_chunks) + [c for c in rescued if c.end_time > c.start_time]
+    out.sort(key=lambda c: c.start_time)
+    for i, c in enumerate(out):
+        c.index = i
+    return out
