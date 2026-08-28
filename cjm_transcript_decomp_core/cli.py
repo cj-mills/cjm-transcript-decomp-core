@@ -78,9 +78,12 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                      help="Run the post-FA event-carve stage (respine trial DEC 6cc10fb7): model "
                           "event spans from --event-propset become gaps between chunks "
                           "(cut-don't-label); typically paired with --no-sentence-split")
-    run.add_argument("--event-propset", default=None,
-                     help="ProposalSetManifest pointer (manifest json or its set dir); "
-                          "REQUIRED with --event-split")
+    run.add_argument("--event-propset", nargs="+", default=None, metavar="POINTER",
+                     help="ProposalSetManifest pointer(s) (manifest json or its set dir); "
+                          "REQUIRED with --event-split. ONE per source: each set carves "
+                          "the source its own manifest names (content hash, else path) — "
+                          "a multi-source run takes one pointer per source, any order; "
+                          "an uncovered source or a stray pointer refuses loudly")
     run.add_argument("--event-classes", nargs="+", default=["inhale"],
                      help="Proposal classes that carve (default: inhale; word-bearing "
                           "classes must never cut)")
@@ -168,12 +171,16 @@ async def run_command(
         seg_capability=args.seg_capability,
         respine=args.respine,
         event_split=args.event_split,
-        event_propset=(args.event_propset or ""),
+        # One pointer per source (0.2.6): the single form stays the config
+        # snapshot's `event_propset` so 0.2.5 consumers read it unchanged.
+        event_propset=(args.event_propset[0] if args.event_propset
+                       and len(args.event_propset) == 1 else ""),
+        event_propsets=list(args.event_propset or []),
         event_classes=list(args.event_classes),
         word_rescue=args.word_rescue,
     )
-    if cfg.event_split and not cfg.event_propset:
-        raise SystemExit("error: --event-split requires --event-propset")
+    if cfg.event_split and not cfg.event_propsets:
+        raise SystemExit("error: --event-split requires --event-propset (one per source)")
 
     # CR-7 GPU subtree attribution is opt-in: --sysmon-capability threads the monitor
     # name into BOTH the manager and the queue; the monitor loads FIRST so GPU

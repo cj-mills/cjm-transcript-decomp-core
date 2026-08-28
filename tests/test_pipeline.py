@@ -194,3 +194,54 @@ def test_event_carve_identity_and_propset_loading(tmp_path):
     import pytest
     with pytest.raises(RuntimeError):
         event_spans_from_propset(tmp_path / "missing", ["inhale"])
+
+
+def test_resolve_event_propsets_joins_each_set_to_its_source(tmp_path):
+    """Multi-source event carve (manifest 0.2.6): resolve_event_propsets joins
+    each proposal set to ITS source by the set manifest's own binding —
+    content hash first, path as the fallback — in any pointer order, and
+    every refusal is loud: an uncovered source, a stray pointer, two sets
+    claiming one source, and a lone mismatched pointer over a lone source
+    (the silent-wrong-spans class)."""
+    import json
+    import pytest
+    from cjm_transcript_decomp_core.pipeline import resolve_event_propsets
+
+    def _set(name, source, spans):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "manifest.json").write_text(json.dumps({
+            "format": "cjm-capability-pyannote/proposal-set-manifest",
+            "proposal_set_id": name, "source": source,
+            "files": {"proposals": "proposals.jsonl"}}))
+        (d / "proposals.jsonl").write_text("\n".join(
+            json.dumps({"label": "inhale", "tier": 1, "start_time": s, "end_time": e})
+            for s, e in spans))
+        return str(d)
+
+    a = _set("propset_a", {"content_hash": "sha256:aaa", "path": "/media/a.wav"}, [(1.0, 1.5)])
+    b = _set("propset_b", {"content_hash": "sha256:bbb", "path": "/media/b.wav"}, [(2.0, 2.5), (3.0, 3.2)])
+    c_path_only = _set("propset_c", {"path": "/media/c.wav"}, [(4.0, 4.1)])
+    sources = [{"source_path": "/media/a.wav", "content_hash": "sha256:aaa"},
+               {"source_path": "/media/b.wav", "content_hash": "sha256:bbb"},
+               {"source_path": "/media/c.wav", "content_hash": "sha256:ccc"}]
+    # any pointer order; hash join for a/b, path fallback for c
+    out = resolve_event_propsets([c_path_only, b, a], sources, ["inhale"])
+    assert [m["proposal_set_id"] for m, _, _ in out] == ["propset_a", "propset_b", "propset_c"]
+    assert [spans for _, spans, _ in out] == [[(1.0, 1.5)], [(2.0, 2.5), (3.0, 3.2)], [(4.0, 4.1)]]
+    assert [ptr for _, _, ptr in out] == [a, b, c_path_only]
+    # single-source, single pointer: the 0.2.5 shape, unchanged
+    assert resolve_event_propsets([a], sources[:1], ["inhale"])[0][0]["proposal_set_id"] == "propset_a"
+    # uncovered source
+    with pytest.raises(RuntimeError, match="no proposal set covers source 2"):
+        resolve_event_propsets([a, b], sources, ["inhale"])
+    # stray pointer (binds to none of the run's sources)
+    with pytest.raises(RuntimeError, match="bind to none"):
+        resolve_event_propsets([a, b], sources[:1], ["inhale"])
+    # two sets claiming one source
+    a2 = _set("propset_a2", {"content_hash": "sha256:aaa", "path": "/media/a.wav"}, [(1.2, 1.4)])
+    with pytest.raises(RuntimeError, match="2 proposal sets claim source 0"):
+        resolve_event_propsets([a, a2], sources[:1], ["inhale"])
+    # lone mismatched pointer over a lone source is NOT tolerated
+    with pytest.raises(RuntimeError, match="no proposal set covers source 0"):
+        resolve_event_propsets([b], sources[:1], ["inhale"])

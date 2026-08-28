@@ -481,27 +481,47 @@ async def run_decomp(
     # (the set IS the cut authority) and the pointer + id land in the manifest
     # (propset -> skeleton chain, DEC 16159e09 manifest-kinds-chainable).
     event_policy = EVENT_SPLIT_POLICY if cfg.event_split else None
-    event_spans: Optional[List[Tuple[float, float]]] = None
+    # Per-source carve authority (manifest 0.2.6): every source resolves ITS
+    # set by the set manifest's own source binding (resolve_event_propsets —
+    # the single-pointer config form is the one-element list), and each
+    # source's set id joins THAT source's skeleton identity. The run-level
+    # fields hold a value only when every source shares it, so single-source
+    # runs are byte-identical to 0.2.5 and multi-source runs never pretend
+    # one authority carved them all.
+    run_sources = src.get("sources", []) or []
+    per_source_propsets: List[Tuple[Dict[str, Any], List[Tuple[float, float]], str]] = []
     if cfg.event_split:
-        if not cfg.event_propset:
+        pointers = list(cfg.event_propsets) or ([cfg.event_propset] if cfg.event_propset else [])
+        if not pointers:
             raise RuntimeError("event_split requires event_propset (the ProposalSetManifest pointer)")
-        propset_manifest, event_spans = event_spans_from_propset(cfg.event_propset, cfg.event_classes)
-        manifest.event_propset_id = str(propset_manifest.get("proposal_set_id") or "")
-        manifest.event_propset = str(cfg.event_propset)
-        logger.info(f"run {run_id}: event-carve consuming {manifest.event_propset_id} "
-                    f"({len(event_spans)} span(s) across classes {cfg.event_classes})")
+        per_source_propsets = resolve_event_propsets(pointers, run_sources, cfg.event_classes)
+        set_ids = sorted({str(m.get("proposal_set_id") or "") for m, _, _ in per_source_propsets})
+        manifest.event_propset_id = set_ids[0] if len(set_ids) == 1 else ""
+        manifest.event_propset = per_source_propsets[0][2] if len(set_ids) == 1 else ""
+        for i, (m, spans, _ptr) in enumerate(per_source_propsets):
+            logger.info(f"run {run_id}: event-carve source {i} consuming "
+                        f"{m.get('proposal_set_id')} ({len(spans)} span(s) across "
+                        f"classes {cfg.event_classes})")
     word_rescue_policy = WORD_RESCUE_POLICY if cfg.word_rescue else None
-    skeleton_config_hash = compute_skeleton_hash(
-        vad_config_hash, split_policy=split_policy,
-        split_min_chunk_s=cfg.split_min_chunk_s,
-        seg_capability=cfg.seg_capability, seg_config_hash=seg_config_hash,
-        respine_token=run_id if cfg.respine else None,
-        event_policy=event_policy,
-        event_propset_id=(manifest.event_propset_id if cfg.event_split else ""),
-        event_classes=(cfg.event_classes if cfg.event_split else None),
-        text_from_capability=str(text_from or ""),
-        text_from_config_hash=str((src_capabilities.get(text_from) or {}).get("config_hash") or ""),
-        word_rescue_policy=word_rescue_policy)
+
+    def _skeleton_hash(event_propset_id: str) -> str:
+        return compute_skeleton_hash(
+            vad_config_hash, split_policy=split_policy,
+            split_min_chunk_s=cfg.split_min_chunk_s,
+            seg_capability=cfg.seg_capability, seg_config_hash=seg_config_hash,
+            respine_token=run_id if cfg.respine else None,
+            event_policy=event_policy,
+            event_propset_id=(event_propset_id if cfg.event_split else ""),
+            event_classes=(cfg.event_classes if cfg.event_split else None),
+            text_from_capability=str(text_from or ""),
+            text_from_config_hash=str((src_capabilities.get(text_from) or {}).get("config_hash") or ""),
+            word_rescue_policy=word_rescue_policy)
+    source_skeletons = ([_skeleton_hash(str(m.get("proposal_set_id") or ""))
+                         for m, _, _ in per_source_propsets] if cfg.event_split
+                        else [_skeleton_hash("")] * len(run_sources))
+    distinct_skeletons = sorted(set(source_skeletons))
+    skeleton_config_hash = (distinct_skeletons[0] if len(distinct_skeletons) == 1
+                            else "" if distinct_skeletons else _skeleton_hash(""))
     manifest.skeleton_config_hash = skeleton_config_hash
     manifest.split_policy = split_policy
     manifest.event_split_policy = event_policy
@@ -526,7 +546,7 @@ async def run_decomp(
 
             source_path, aligned = await decompose_source(
                 queue, cfg, source, i, transcribers, text_from,
-                event_spans=event_spans)
+                event_spans=(per_source_propsets[i][1] if cfg.event_split else None))
             title = Path(source_path).stem or f"source-{i}"
 
             empty = sum(1 for a in aligned if not a.text.strip())
@@ -543,7 +563,7 @@ async def run_decomp(
             policy_label = "+".join(
                 p for p in (split_policy, event_policy, word_rescue_policy) if p) or None
             nodes, edges, ids = build_extension_payload(
-                source, src_capabilities, skeleton_config_hash, text_from, aligned,
+                source, src_capabilities, source_skeletons[i], text_from, aligned,
                 split_policy=policy_label)
 
             if not confirm_seam("commit-review",
@@ -605,7 +625,11 @@ async def run_decomp(
 
             manifest.sources.append(DecompSourceRecord(
                 source_node_id=ids["source"], source_path=source_path, title=title,
-                segment_count=len(ids["segments"]), segment_ids=ids["segments"]))
+                segment_count=len(ids["segments"]), segment_ids=ids["segments"],
+                skeleton_config_hash=source_skeletons[i],
+                event_propset_id=(str(per_source_propsets[i][0].get("proposal_set_id") or "")
+                                  if cfg.event_split else ""),
+                event_propset=(per_source_propsets[i][2] if cfg.event_split else "")))
     except BaseException as e:
         # The journal exists for exactly this row: a run that DIED records
         # how far it got (failures stop being the unattributed case).
@@ -749,3 +773,47 @@ def event_spans_from_propset(
             spans.append((s, e))
     spans.sort()
     return manifest, spans
+
+
+def resolve_event_propsets(
+    pointers: List[Union[str, Path]],  # ProposalSetManifest pointers (manifest json or set dir), any order
+    sources: List[Dict[str, Any]],     # The transcription run's sources, manifest order
+    classes: List[str],                # Proposal classes that carve
+) -> List[Tuple[Dict[str, Any], List[Tuple[float, float]], str]]:  # Per source, manifest order: (set manifest, carve spans, the pointer as given)
+    """Join each proposal set to ITS source by the set manifest's own source
+    binding (multi-source event carve, manifest 0.2.6): a set matches a run
+    source when its source.content_hash equals the source's content_hash,
+    else when its source.path equals the source's source_path. One set
+    carves ONE source, so every refusal is LOUD: a source no pointer covers
+    (propose over it first), a pointer claiming none of the run's sources
+    (a wrong pick), two pointers claiming one source (ambiguous authority).
+    A lone pointer over a lone source with NEITHER key matching is refused
+    too — that is exactly the silent-wrong-spans class the batch guard
+    existed for (a set whose manifest names a different media file)."""
+    loaded = [(str(p),) + event_spans_from_propset(p, classes) for p in pointers]
+    out: List[Tuple[Dict[str, Any], List[Tuple[float, float]], str]] = []
+    claimed: Dict[str, int] = {}
+    for i, src in enumerate(sources):
+        h = str(src.get("content_hash") or "")
+        path = str(src.get("source_path") or "")
+        hits = [(ptr, m, spans) for ptr, m, spans in loaded
+                if (h and str((m.get("source") or {}).get("content_hash") or "") == h)
+                or (path and str((m.get("source") or {}).get("path") or "") == path)]
+        name = Path(path).name if path else (h or f"source-{i}")
+        if not hits:
+            raise RuntimeError(
+                f"event-split: no proposal set covers source {i} ({name}) — "
+                f"propose over it first (pointers given: {[p for p, _, _ in loaded]})")
+        if len(hits) > 1:
+            raise RuntimeError(
+                f"event-split: {len(hits)} proposal sets claim source {i} ({name}): "
+                f"{[p for p, _, _ in hits]} — pass exactly one set per source")
+        ptr, m, spans = hits[0]
+        claimed[ptr] = i
+        out.append((m, spans, ptr))
+    stray = [ptr for ptr, _, _ in loaded if ptr not in claimed]
+    if stray:
+        raise RuntimeError(
+            f"event-split: proposal set(s) {stray} bind to none of this run's "
+            f"{len(sources)} source(s) — a set carves only the source its manifest names")
+    return out

@@ -158,8 +158,12 @@ def batch_argv(
         # classes render explicitly — the printed argv is the full contract.
         # The GROUP's resolved propset wins (per-source picker, DEC ae450551);
         # the CLI flag is the scripted path's pin.
+        # A group's propset is ONE pointer per source (0.2.6): a str for a
+        # single-source group, a list/tuple for a multi-source run.
+        ps = batch.get("event_propset") or args.event_propset
+        pointers = [ps] if isinstance(ps, str) else list(ps or [])
         argv += ["--event-split",
-                 "--event-propset", batch.get("event_propset") or args.event_propset,
+                 "--event-propset", *pointers,
                  "--event-classes", *args.event_classes]
     if args.actor:
         argv += ["--actor", args.actor]

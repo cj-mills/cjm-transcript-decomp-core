@@ -122,7 +122,8 @@ class DecompConfig:
     seg_capability: str = "cjm-capability-pysbd"  # Sentence-segmentation capability id (B.5; loaded only when sentence_split)
     respine: bool = False           # Mint a FRESH skeleton under the SAME config (DEC 9241564f): the run id joins the identity input, so the new spine never collides with the config-identical one (post-upgrade re-runs, finding e8458f6e)
     event_split: bool = False       # Run the post-FA event-carve stage (respine trial DEC 6cc10fb7): model event spans from `event_propset` become gaps between chunks (cut-don't-label); composable with sentence_split, but the trial runs it INSTEAD
-    event_propset: str = ""         # ProposalSetManifest pointer (manifest json or its set dir) — the model-cut authority consumed BY POINTER; REQUIRED when event_split
+    event_propset: str = ""         # ProposalSetManifest pointer (manifest json or its set dir) — the model-cut authority consumed BY POINTER; the SINGLE-source form (kept for config-snapshot compatibility; REQUIRED when event_split and event_propsets is empty)
+    event_propsets: List[str] = field(default_factory=list)  # Per-source ProposalSetManifest pointers (0.2.6, multi-source runs): each set joins ITS source by the manifest's own source binding (content hash, else path) — resolve_event_propsets refuses an uncovered source or a stray pointer loudly
     event_classes: List[str] = field(default_factory=lambda: ["inhale"])  # Proposal classes that carve (word-bearing classes like hesitation-marker must never cut)
     word_rescue: bool = True        # Run the post-carve word-rescue stage (96edc646 verdict bc7ece7b): authoritative FA words stranded outside every chunk get chunks minted — DEFAULT-ON (mis-homing is silent data corruption; opting out hides it)
 
@@ -141,6 +142,9 @@ class DecompSourceRecord:
     title: str           # Source display title
     segment_count: int   # Number of fine Segment nodes committed
     segment_ids: List[str] = field(default_factory=list)  # Graph Segment node ids, in order
+    skeleton_config_hash: str = ""  # THIS source's Segment identity input (0.2.6): equals the run-level value unless the event stage carved per source
+    event_propset_id: str = ""      # The ProposalSetManifest THIS source's carve consumed (0.2.6; per-source propset -> skeleton chain join key)
+    event_propset: str = ""         # Recorded pointer of that set (0.2.6)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form
         """Serialize to a plain dict."""
@@ -169,7 +173,7 @@ class DecompManifest:
     event_propset: str = ""             # Recorded path of the consumed ProposalSetManifest (0.2.4; the pointer)
 
     FORMAT: str = field(default="cjm-transcript-decomp-core/run-manifest", repr=False)  # Format tag
-    VERSION: str = field(default="0.2.5", repr=False)                                   # Schema version (0.2.5: word-rescue policy recorded; 0.2.4: event-carve respine — propset pointer + id + event policy recorded; 0.2.3: capability-driven sentence split)
+    VERSION: str = field(default="0.2.6", repr=False)                                   # Schema version (0.2.6: per-source skeleton hash + consumed propset on each source record — multi-source event carve; the run-level fields hold the value only when every source shares it; 0.2.5: word-rescue policy recorded; 0.2.4: event-carve respine — propset pointer + id + event policy recorded; 0.2.3: capability-driven sentence split)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form for JSON serialization
         """Serialize to a plain dict with nested sources."""

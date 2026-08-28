@@ -349,3 +349,23 @@ def test_training_run_resolve_pick_ladder_and_describe(tmp_path):
     # No holdout block: the first metric is the headline; no base/ds: elided
     line = TrainingRunIndex.describe(idx.runs[0])
     assert "loss/val 0.081" in line and "ds …" not in line and "segmentation" not in line
+
+
+def test_batch_argv_renders_one_pointer_per_source():
+    """Multi-source event carve (decomp manifest 0.2.6): a group's resolved
+    propset may be a LIST/TUPLE (one pointer per source of a multi-source
+    run) — batch_argv renders every pointer under one --event-propset, in
+    order, and the single-source str form renders exactly as before."""
+    args = resolve_split_flags(build_parser().parse_args(
+        ["--event-split", "--event-classes", "inhale"]))
+    multi = batch_argv({"text_from": None, "graph_db_path": None,
+                        "event_propset": ("/sets/p_src0", "/sets/p_src1"),
+                        "manifests": ["ab.json"]}, args, None)
+    i = multi.index("--event-propset")
+    assert multi[i + 1:i + 3] == ["/sets/p_src0", "/sets/p_src1"]
+    assert multi[i + 3] == "--event-classes"
+    single = batch_argv({"text_from": None, "graph_db_path": None,
+                         "event_propset": "/sets/p_only",
+                         "manifests": ["a.json"]}, args, None)
+    j = single.index("--event-propset")
+    assert single[j + 1] == "/sets/p_only" and single[j + 2] == "--event-classes"
