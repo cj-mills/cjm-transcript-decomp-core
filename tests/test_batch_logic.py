@@ -293,3 +293,59 @@ def test_training_run_index_discovery_and_resolve(tmp_path):
     # Empty dir: no runs, loud None
     empty = TrainingRunIndex(str(tmp_path / "nowhere"))
     assert empty.load() == 0 and empty.resolve() is None
+
+
+def test_training_run_resolve_pick_ladder_and_describe(tmp_path):
+    """Work item a13ebc66 (the propose training-run picker): the model
+    ladder is PICK > PIN > NEWEST with the reason named alongside, and every
+    miss is a loud None (a vanished pick, a pin matching nothing) — never a
+    silent fall-through to a different model. describe() reads a picker
+    row off the manifest alone: id · base · [classes] · headline eval ·
+    dataset tail · date."""
+    from cjm_transcript_decomp_core.runs import TrainingRunIndex
+    d = tmp_path / "training-runs"
+
+    def _run(run_id, classes, extra=None):
+        rd = d / run_id
+        rd.mkdir(parents=True)
+        m = {"format": TrainingRunIndex.FORMAT, "run_id": run_id, "classes": classes}
+        m.update(extra or {})
+        (rd / "manifest.json").write_text(json.dumps(m))
+
+    _run("trainrun_20260731_002436_6f803b12", ["speech", "inhale"],
+         {"base_model": {"model_id": "pyannote/segmentation-3.0"},
+          "dataset_id": "dataset_20260730_e53b8daa", "created_at": 1785000000.0,
+          "eval": {"holdout": {"auroc": {"macro": 0.99659}},
+                   "metrics": {"loss/val": 0.0634}}})
+    _run("trainrun_20260805_104926_73000552", ["click", "inhale"],
+         {"eval": {"metrics": {"loss/val": 0.0812}}})
+    idx = TrainingRunIndex(str(d))
+    assert idx.load() == 2
+    # No pick, no pin: newest is only a default, and the reason says so
+    run, why = idx.resolve_pick(None, None)
+    assert run["run_id"].endswith("73000552") and why == "newest run, no pin"
+    # The pin is the standing default over recency
+    run, why = idx.resolve_pick(None, "6f803b12")
+    assert run["run_id"].endswith("6f803b12") and why == "workspace pin"
+    # A pick outranks the pin — by _path, full id, or tail
+    older = idx.runs[1]
+    for pick in (older["_path"], older["run_id"], "6f803b12"):
+        run, why = idx.resolve_pick(pick, "73000552")
+        assert run["run_id"].endswith("6f803b12") and why == "picked"
+    run, why = idx.resolve_pick("73000552", "6f803b12")
+    assert run["run_id"].endswith("73000552") and why == "picked"
+    # Misses are LOUD: a vanished pick never falls through to the pin
+    run, why = idx.resolve_pick("deadbeef", "6f803b12")
+    assert run is None and "deadbeef" in why and "no longer on disk" in why
+    run, why = idx.resolve_pick(None, "deadbeef")
+    assert run is None and "matches nothing" in why
+    empty = TrainingRunIndex(str(tmp_path / "nowhere"))
+    empty.load()
+    assert empty.resolve_pick(None, None) == (None, f"no training runs under {empty.training_runs_dir}")
+    # describe(): the row facts a picker paints
+    line = TrainingRunIndex.describe(older)
+    assert line.startswith("trainrun_20260731_002436_6f803b12 · segmentation-3.0 · [speech,inhale]")
+    assert "auroc 0.997" in line and "ds …e53b8daa" in line and "2026-07-" in line
+    # No holdout block: the first metric is the headline; no base/ds: elided
+    line = TrainingRunIndex.describe(idx.runs[0])
+    assert "loss/val 0.081" in line and "ds …" not in line and "segmentation" not in line

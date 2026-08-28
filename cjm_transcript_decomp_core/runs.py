@@ -9,6 +9,7 @@ tag — the manifest-as-interchange contract (CR-20) — is what separates
 transcription runs from decomp runs living in one directory."""
 
 import json
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -294,3 +295,66 @@ class TrainingRunIndex:
         """Footer text for the two-step confirm: run id tail + trained classes."""
         classes = ",".join(m.get("classes") or []) or "?"
         return f"{str(m.get('run_id') or '?')[-8:]} [{classes}]"
+
+    def resolve_pick(
+        self,
+        pick: Optional[str] = None,  # In-session picker choice: a run's _path or run id (tail ok)
+        pin: Optional[str] = None,   # Workspace-marker pin (the standing default)
+    ) -> Tuple[Optional[Dict[str, Any]], str]:  # (run or None, the reason the confirm names)
+        """The propose-model ladder (work item a13ebc66): PICK > PIN > NEWEST.
+        A picker choice made in this sitting outranks the workspace marker's
+        flywheel.event_training_run pin — the pin demotes from the only
+        control to the fallback default, so swapping to a test run and back
+        no longer means hand-editing cjm-workspace.yaml (and the yaml's
+        provenance comments are never rewritten). Every miss is LOUD (None +
+        the reason): a pick whose run vanished from disk, or a pin matching
+        nothing, never silently falls through to a different model (the
+        b9717422 field-failure class the register retired overlay-v1 for)."""
+        if pick:
+            for m in self.runs:
+                rid = str(m.get("run_id") or "")
+                if m.get("_path") == pick or rid == pick or rid.endswith(pick):
+                    return m, "picked"
+            return None, f"picked run {pick!r} no longer on disk"
+        if pin:
+            run = self.resolve(pin)
+            return (run, "workspace pin") if run is not None else (
+                None, f"training-run pin {pin!r} matches nothing under "
+                      f"{self.training_runs_dir}")
+        if self.runs:
+            return self.runs[0], "newest run, no pin"
+        return None, f"no training runs under {self.training_runs_dir}"
+
+    @staticmethod
+    def describe(m: Dict[str, Any]) -> str:  # One picker-row line of manifest facts
+        """A picker row's facts, read off the manifest alone (capability-
+        generic): run id · base model · [classes] · the headline eval
+        (macro AUROC when the holdout block carries it, else the first
+        metric) · consumed dataset tail · mint date."""
+        parts = [str(m.get("run_id") or "?")]
+        base = str((m.get("base_model") or {}).get("model_id")
+                   or (m.get("config") or {}).get("base_model_id") or "")
+        if base:
+            segs = base.rstrip("/").split("/")
+            # a hub id ends in the model name; a local checkpoint path ends
+            # in a weights FILE — name its directory instead
+            ext = segs[-1].rsplit(".", 1)[-1].lower()
+            parts.append(segs[-2] if len(segs) > 1 and ext in
+                         ("bin", "ckpt", "pt", "pth", "safetensors")
+                         else segs[-1])
+        parts.append("[" + (",".join(m.get("classes") or []) or "?") + "]")
+        ev = m.get("eval") or {}
+        macro = ((ev.get("holdout") or {}).get("auroc") or {}).get("macro")
+        metrics = ev.get("metrics") or {}
+        if isinstance(macro, (int, float)):
+            parts.append(f"auroc {macro:.3f}")
+        elif metrics:
+            k, v = next(iter(metrics.items()))
+            parts.append(f"{k} {v:.3f}" if isinstance(v, float) else f"{k} {v}")
+        ds = str(m.get("dataset_id") or "")
+        if ds:
+            parts.append(f"ds …{ds[-8:]}")
+        created = m.get("created_at")
+        if created:
+            parts.append(time.strftime("%Y-%m-%d", time.localtime(float(created))))
+        return " · ".join(parts)
