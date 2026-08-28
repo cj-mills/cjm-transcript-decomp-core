@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_substrate.core.workspace import resolve_recorded_tree
+from cjm_substrate.utils.lifecycle import partition_lifecycle
 
 
 def _load_manifests(
@@ -187,7 +188,8 @@ class PropsetIndex:
 
     def __init__(self, proposals_dir: str = "proposals"):  # Workspace proposals/ (else cwd-relative)
         self.proposals_dir = Path(proposals_dir)
-        self.sets: List[Dict[str, Any]] = []  # Manifest dicts, newest first (+ "_path")
+        self.sets: List[Dict[str, Any]] = []  # ACTIVE manifest dicts, newest first (+ "_path", "_lifecycle")
+        self.archived: List[Dict[str, Any]] = []  # Archived sets (lifecycle sidecar, b20cb911) — off every ring, still on disk
 
     def load(self) -> int:  # Number of proposal sets loaded
         """(Re)read every readable proposal-set manifest, newest first (the
@@ -207,8 +209,11 @@ class PropsetIndex:
             m["_path"] = str(f)
             rows.append(m)
         rows.sort(key=lambda m: float(m.get("created_at") or 0.0), reverse=True)
-        self.sets = rows
-        return len(rows)
+        # Lifecycle (b20cb911, DEC 14678fc9): an archived set leaves every
+        # ring and default (for_source reads `sets`) but stays on disk under
+        # `archived` — the sidecar seam in cjm_substrate.utils.lifecycle.
+        self.sets, self.archived = partition_lifecycle(rows)
+        return len(self.sets)
 
     def for_source(
         self,
@@ -252,7 +257,8 @@ class TrainingRunIndex:
 
     def __init__(self, training_runs_dir: str = "training-runs"):  # Workspace training-runs/ (else cwd-relative)
         self.training_runs_dir = Path(training_runs_dir)
-        self.runs: List[Dict[str, Any]] = []  # Manifest dicts, newest first (+ "_path")
+        self.runs: List[Dict[str, Any]] = []  # ACTIVE manifest dicts, newest first (+ "_path", "_lifecycle")
+        self.archived: List[Dict[str, Any]] = []  # Archived runs (lifecycle sidecar, b20cb911) — off the ladder, shown on demand
 
     def load(self) -> int:  # Number of training runs loaded
         """(Re)read every readable training-run manifest, newest first (run
@@ -272,8 +278,11 @@ class TrainingRunIndex:
             m["_path"] = str(f)
             rows.append(m)
         rows.sort(key=lambda m: str(m.get("run_id") or ""), reverse=True)
-        self.runs = rows
-        return len(rows)
+        # Lifecycle (b20cb911, DEC 14678fc9): an archived run leaves the
+        # ladder and the picker's default list but stays on disk under
+        # `archived` — the m picker's h toggle lists it dimmed, a/x act on it.
+        self.runs, self.archived = partition_lifecycle(rows)
+        return len(self.runs)
 
     def resolve(
         self,
@@ -315,15 +324,36 @@ class TrainingRunIndex:
                 rid = str(m.get("run_id") or "")
                 if m.get("_path") == pick or rid == pick or rid.endswith(pick):
                     return m, "picked"
+            gone = self._archived_match(pick)
+            if gone is not None:
+                return None, (f"picked run …{str(gone.get('run_id') or '?')[-8:]} "
+                              f"is ARCHIVED — m picks another (h shows archived)")
             return None, f"picked run {pick!r} no longer on disk"
         if pin:
             run = self.resolve(pin)
-            return (run, "workspace pin") if run is not None else (
-                None, f"training-run pin {pin!r} matches nothing under "
-                      f"{self.training_runs_dir}")
+            if run is not None:
+                return run, "workspace pin"
+            if self._archived_match(pin) is not None:
+                return None, (f"training-run pin {pin!r} matches an ARCHIVED "
+                              f"run — m picks another, or unarchive it")
+            return None, (f"training-run pin {pin!r} matches nothing under "
+                          f"{self.training_runs_dir}")
         if self.runs:
             return self.runs[0], "newest run, no pin"
         return None, f"no training runs under {self.training_runs_dir}"
+
+    def _archived_match(
+        self,
+        handle: str,  # A run's _path, run id, or id tail
+    ) -> Optional[Dict[str, Any]]:  # The ARCHIVED run the handle names, or None
+        """The loud-miss lookup: a pick or pin that resolves to nothing in
+        `runs` may name a run that was ARCHIVED (b20cb911) — the reason
+        says so instead of 'no longer on disk' / 'matches nothing'."""
+        for m in self.archived:
+            rid = str(m.get("run_id") or "")
+            if m.get("_path") == handle or rid == handle or rid.endswith(handle):
+                return m
+        return None
 
     @staticmethod
     def describe(m: Dict[str, Any]) -> str:  # One picker-row line of manifest facts

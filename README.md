@@ -82,6 +82,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `event_spans_from_propset` _function_ — Load a proposal set BY POINTER and select its carve spans (respine trial
 - `fa_words_from_result` _function_ — Normalize a typed forced-alignment result into FA words (pure; stage 3).
 - `load_source_manifest` _function_ — Load + lightly validate a transcription-core run manifest.
+- `resolve_event_propsets` _function_ — Join each proposal set to ITS source by the set manifest's own source
 - `run_decomp` _function_ — Extend every source in a transcription run manifest with its fine spine.
 - `sentence_spans_from_result` _function_ — Normalize a typed sentence-segmentation result into char-span tuples (pure; B.5).
 - `submit_and_wait` _function_ — Submit one capability job, wait for it, and return its result (raise on failure).

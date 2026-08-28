@@ -369,3 +369,58 @@ def test_batch_argv_renders_one_pointer_per_source():
                          "manifests": ["a.json"]}, args, None)
     j = single.index("--event-propset")
     assert single[j + 1] == "/sets/p_only" and single[j + 2] == "--event-classes"
+
+
+def test_lifecycle_archived_artifacts_leave_pickers_and_misses_are_loud(tmp_path):
+    """Work item b20cb911 (DEC 14678fc9): an archived training run / proposal
+    set (a lifecycle.json sidecar beside the manifest, the substrate seam)
+    leaves the index's default list — the ladder never resolves to it and
+    for_source skips it — but stays reachable via `archived`, and a pick or
+    pin that lands on one is a LOUD miss naming the archive, never a silent
+    fall-through to another model."""
+    from cjm_substrate.utils.lifecycle import ArtifactLifecycle
+    from cjm_transcript_decomp_core.runs import PropsetIndex, TrainingRunIndex
+    trs = tmp_path / "training-runs"
+    for rid in ("trainrun_1_6f803b12", "trainrun_2_fa3035c6"):
+        (trs / rid).mkdir(parents=True)
+        (trs / rid / "manifest.json").write_text(json.dumps(
+            {"format": TrainingRunIndex.FORMAT, "run_id": rid, "classes": ["speech"]}))
+    idx = TrainingRunIndex(str(trs))
+    assert idx.load() == 2 and idx.archived == []
+    ArtifactLifecycle(trs / "trainrun_2_fa3035c6").archive(reason="test run")
+    assert idx.load() == 1
+    assert [m["run_id"][-8:] for m in idx.runs] == ["6f803b12"]
+    assert [m["run_id"][-8:] for m in idx.archived] == ["fa3035c6"]
+    assert idx.runs[0]["_lifecycle"] == "active"
+    assert idx.archived[0]["_lifecycle"] == "archived"
+    # newest-no-pin skips the archived head; a pin or pick on it is loud
+    run, why = idx.resolve_pick(None, None)
+    assert run["run_id"].endswith("6f803b12") and why == "newest run, no pin"
+    run, why = idx.resolve_pick(None, "fa3035c6")
+    assert run is None and "ARCHIVED" in why and "fa3035c6" in why
+    run, why = idx.resolve_pick(idx.archived[0]["_path"], "6f803b12")
+    assert run is None and "ARCHIVED" in why and "fa3035c6" in why
+    run, why = idx.resolve_pick(None, "deadbeef")
+    assert run is None and "matches nothing" in why
+    # unarchive restores it as the newest default
+    ArtifactLifecycle(trs / "trainrun_2_fa3035c6").unarchive()
+    assert idx.load() == 2
+    assert idx.resolve_pick(None, None)[0]["run_id"].endswith("fa3035c6")
+    # proposal sets: the archived set leaves its source's ring, the older
+    # generation heads it again, and `archived` keeps it inspectable
+    props = tmp_path / "proposals"
+    for pid, created in (("propset_1_aaaaaaaa", 1.0), ("propset_2_bbbbbbbb", 2.0)):
+        (props / pid).mkdir(parents=True)
+        (props / pid / "manifest.json").write_text(json.dumps(
+            {"format": PropsetIndex.FORMAT, "proposal_set_id": pid,
+             "created_at": created, "counts": {"inhale": 1},
+             "source": {"content_hash": "sha256:xx", "path": "/x.wav"}}))
+    pidx = PropsetIndex(str(props))
+    assert pidx.load() == 2
+    assert [m["proposal_set_id"][-8:] for m in pidx.for_source("sha256:xx")] \
+        == ["bbbbbbbb", "aaaaaaaa"]
+    ArtifactLifecycle(props / "propset_2_bbbbbbbb").archive()
+    assert pidx.load() == 1
+    assert [m["proposal_set_id"][-8:] for m in pidx.for_source("sha256:xx")] \
+        == ["aaaaaaaa"]
+    assert [m["proposal_set_id"][-8:] for m in pidx.archived] == ["bbbbbbbb"]
