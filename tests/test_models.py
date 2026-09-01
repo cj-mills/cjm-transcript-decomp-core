@@ -1,6 +1,8 @@
 """Tests for cjm_transcript_decomp_core.models — decomposition data shapes.
 
 Projected from the models notebook's smoke-check cell at the golden-reference flip."""
+import re
+
 from cjm_transcript_decomp_core.models import (
     DecompManifest,
     DecompSegment,
@@ -38,7 +40,11 @@ def test_manifest_shape_and_run_id():
     m = DecompManifest(run_id="r", created_at=0.0, config={}, source_manifest="/tmp/s.json")
     md = m.to_dict()
     assert md["format"] == "cjm-transcript-decomp-core/run-manifest"
-    assert md["version"] == "0.2.6" and md["sources"] == []
+    # Compare to the dataclass default, not a literal: the literal pin went RED on the first
+    # run after every manifest bump (0.2.3 -> 0.2.6), training agents to ignore a red test
+    # (housekeeping 042b7805). The shape check below keeps the version a real semver.
+    assert md["version"] == m.VERSION and md["sources"] == []
+    assert re.fullmatch(r"\d+\.\d+\.\d+", m.VERSION)
     # 0.2.2: skeleton identity rides the manifest (empty/None until run_decomp fills them)
     assert md["skeleton_config_hash"] == "" and md["split_policy"] is None
     # 0.2.4: event-carve chain fields (empty/None until an event_split run fills them)
