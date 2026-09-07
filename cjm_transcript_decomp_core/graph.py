@@ -3,7 +3,8 @@
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
-from cjm_context_graph_layer.grammar import grouped_spine_edges, SpineRelations
+from cjm_context_graph_layer.grammar import (grouped_spine_edges, make_edge, OverlayRelations,
+                                             SpineRelations)
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.graph import GraphNode
 from cjm_context_graph_primitives.provenance import SourceRef
@@ -80,7 +81,9 @@ def build_extension_payload(
     transcriber variant; `text_from` is recorded per segment as provenance
     (which Transcript the layer-0 text came from), never as global config. Edges
     come from `grouped_spine_edges`: PART_OF to the OWNING AudioRendition,
-    STARTS_WITH per rendition, NEXT chained source-wide across coarse boundaries.
+    STARTS_WITH per rendition, NEXT chained source-wide across coarse boundaries —
+    plus one DERIVED_FROM per sliced Transcript (text provenance as an edge,
+    finding 89b16be6; role=text_from marks the authoritative one).
     """
     roots = resolve_root_ids(source_entry, capabilities_info)
     source_id = roots["source"]
@@ -114,6 +117,13 @@ def build_extension_payload(
 
     # The fine spine hangs under each segment's RENDITION (PART_OF rendition).
     edges = grouped_spine_edges([(asegs[i]["rendition"], groups[i]) for i in sorted(groups)])
+    # Text provenance is an EDGE, not only a property (finding 89b16be6): each
+    # Segment DERIVED_FROM every Transcript it slices (role=text_from on the
+    # authoritative one), so Segments are reachable from their Transcript by
+    # traversal the way they already were from their AudioRendition. Derived
+    # from the node's own refs — the same derivation the backfill verb uses.
+    for node in nodes:
+        edges.extend(provenance_edges_from_segment_wire(node))
     ids = {"source": source_id, "segments": seg_ids,
            "audio_segments": [a["audio_segment"] for a in asegs],
            "renditions": [a["rendition"] for a in asegs],
@@ -273,3 +283,48 @@ async def verify_source(
         all_have_sources=missing_sources == 0,
         source_locators=sorted(locators),
     )
+
+
+def segment_provenance_edges(
+    segment_id: str,                   # The Segment node id
+    transcript_ids: List[str],         # Transcript node ids the segment slices text from (any order; de-duplicated)
+    text_from: Optional[str] = None,   # The authoritative Transcript id (None when the segment carries no text)
+) -> List[Dict[str, Any]]:  # DERIVED_FROM edge wires, Segment -> Transcript, one per distinct transcript
+    """Text provenance as EDGES (finding 89b16be6, the references-must-be-edges
+    instance): a Segment's text comes from Transcript nodes, and until now that
+    link lived only in `text_from` metadata + the CharSlice source refs, so a
+    Segment was unreachable from its Transcript by traversal (the only
+    traceability edge went to the AudioRendition). One DERIVED_FROM per sliced
+    Transcript; the authoritative one carries role=text_from, the rest
+    role=variant. Ids are deterministic from the triple, so a backfill over
+    existing Segments and a fresh decomposition converge on the same edges."""
+    seen: set = set()
+    edges: List[Dict[str, Any]] = []
+    for tid in transcript_ids:
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        role = "text_from" if tid == text_from else "variant"
+        edges.append(make_edge(segment_id, tid, OverlayRelations.DERIVED_FROM, {"role": role}))
+    return edges
+
+
+def provenance_edges_from_segment_wire(
+    node: Dict[str, Any],  # A Segment node wire (or projected row): {"id", "properties"?, "sources", "text_from"?}
+) -> List[Dict[str, Any]]:  # The segment's DERIVED_FROM edges, derived from its own refs
+    """Derive a Segment's Transcript provenance edges from the node itself:
+    every `char`-sliced source ref's graph-node locator is a Transcript the
+    segment slices text from, and `text_from` (a property on a wire, a
+    projected field on a query row) names the authoritative one. ONE derivation
+    for both callers — `build_extension_payload` at decomposition time and the
+    `backfill-provenance` verb over Segments already on the graph — so the
+    backfill reproduces exactly what a fresh run would emit."""
+    props = node.get("properties") or {}
+    text_from = props.get("text_from", node.get("text_from"))
+    tids: List[str] = []
+    for ref in node.get("sources") or []:
+        sl = ref.get("slice") or {}
+        loc = ref.get("locator") or {}
+        if sl.get("kind") == "char" and loc.get("node_id"):
+            tids.append(loc["node_id"])
+    return segment_provenance_edges(node["id"], tids, text_from)

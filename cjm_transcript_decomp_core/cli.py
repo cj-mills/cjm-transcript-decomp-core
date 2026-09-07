@@ -27,9 +27,13 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from cjm_context_graph_layer.journal import journal_extend, sidecar_journal_path
+from cjm_context_graph_layer.ops import graph_task
+from cjm_context_graph_primitives.query import NodeQuery
 from cjm_substrate.core.manager import CapabilityManager
 from cjm_substrate.core.queue import JobQueue
 from cjm_substrate.core.workspace import resolve_workspace
+from cjm_transcript_decomp_core.graph import provenance_edges_from_segment_wire
 from cjm_transcript_decomp_core.models import DecompConfig
 from cjm_transcript_decomp_core.pipeline import load_source_manifest, run_decomp
 
@@ -107,6 +111,29 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     run.add_argument("--actor", default=None,
                      help="Journal attribution for who/what initiated this run (default: cli:<username>)")
     run.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging")
+
+    # ---- backfill-provenance: Segment -> Transcript DERIVED_FROM edges (finding 89b16be6) ----
+    bp = sub.add_parser(
+        "backfill-provenance",
+        help="Mint Segment -> Transcript DERIVED_FROM edges for Segments already on the graph "
+             "(text provenance as an edge, not only text_from metadata); journaled per source "
+             "under spine-extension, idempotent on re-run")
+    bp.add_argument("--source", default=None,
+                    help="Restrict to one Source node id (prefix ok; default: every Segment)")
+    bp.add_argument("--page-size", type=int, default=2000,
+                    help="Segments per query page (default 2000)")
+    bp.add_argument("--manifests-dir", default=".cjm/manifests", help="Capability manifests directory")
+    bp.add_argument("--graph-capability", default="cjm-capability-graph-sqlite",
+                    help="Graph-storage capability name")
+    bp.add_argument("--graph-db-path", default=None,
+                    help="Graph db path (default: the workspace capability config)")
+    bp.add_argument("--workspace", default=None,
+                    help="Workspace root (default: CJM_WORKSPACE env, else upward walk from cwd)")
+    bp.add_argument("--actor", default=None,
+                    help="Journal attribution (default: cli:<username>)")
+    bp.add_argument("--dry-run", action="store_true",
+                    help="Count the edges per source; touch neither graph nor journal")
+    bp.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging")
     return parser
 
 
@@ -263,4 +290,80 @@ def main(
     )
     if args.command == "run":
         return asyncio.run(run_command(args))
+    if args.command == "backfill-provenance":
+        return asyncio.run(backfill_provenance_command(args))
     raise SystemExit(f"unknown command: {args.command}")
+
+
+async def backfill_provenance_command(
+    args: argparse.Namespace,  # Parsed CLI arguments for the `backfill-provenance` subcommand
+) -> int:  # Process exit code
+    """Execute `backfill-provenance`: mint the Segment -> Transcript DERIVED_FROM
+    edges (finding 89b16be6) for Segments already on the graph, deriving each
+    segment's edges from its own refs (`provenance_edges_from_segment_wire`,
+    the same derivation a fresh decomposition uses). Journaled per SOURCE under
+    the existing `spine-extension` verb (edges-only wires; the replay handler
+    is already registered, and `journal_extend`'s added-delta trim keeps a
+    re-run silent), args carry act=provenance-backfill so the ops read as what
+    they are. Pages the Segment table so a 100k-segment graph never sits in one
+    query; --source narrows to one Source id (prefix ok); --dry-run counts."""
+    ws = resolve_workspace(explicit=getattr(args, "workspace", None))
+    if ws is not None:
+        os.environ["CJM_WORKSPACE"] = str(ws.root)
+    manager = CapabilityManager(search_paths=[Path(args.manifests_dir)])
+    configs = ({args.graph_capability: {"db_path": args.graph_db_path}}
+               if args.graph_db_path else None)
+    load_capabilities(manager, [args.graph_capability], configs=configs)
+    effective = args.graph_db_path or (
+        (manager.instances[args.graph_capability].config or {}).get("db_path"))
+    if not effective:
+        raise SystemExit("no graph db path: pass --graph-db-path, or persist one on the "
+                         f"{args.graph_capability} instance in the active workspace's config store")
+    journal_path = sidecar_journal_path(str(effective))
+    actor = args.actor or f"cli:{getpass.getuser()}"
+    queue = JobQueue(deps=manager)
+    await queue.start()
+    try:
+        per_source: Dict[str, List[Dict[str, Any]]] = {}
+        seg_counts: Dict[str, int] = {}
+        offset = 0
+        while True:
+            nq = NodeQuery(label="Segment", project=["text_from", "source_id", "sources"],
+                           limit=args.page_size, offset=offset)
+            res = await graph_task(queue, args.graph_capability, "query_nodes", query=nq.to_dict())
+            rows = list(res.rows or [])
+            for row in rows:
+                sid = row.get("source_id") or "?"
+                if args.source and not sid.startswith(args.source):
+                    continue
+                seg_counts[sid] = seg_counts.get(sid, 0) + 1
+                per_source.setdefault(sid, []).extend(provenance_edges_from_segment_wire(row))
+            if len(rows) < args.page_size:
+                break
+            offset += len(rows)
+        total_edges = sum(len(v) for v in per_source.values())
+        if args.dry_run:
+            for sid in sorted(per_source):
+                print(f"{sid[:8]}  segments={seg_counts[sid]}  edges={len(per_source[sid])}")
+            print(f"dry run: {len(per_source)} sources, {sum(seg_counts.values())} segments, "
+                  f"{total_edges} DERIVED_FROM edges (nothing written)")
+            return 0
+        added = 0
+        for sid in sorted(per_source):
+            edges = per_source[sid]
+            if not edges:
+                continue
+            r = await journal_extend(queue, args.graph_capability, [], edges,
+                                     journal_path=journal_path, verb="spine-extension",
+                                     actor=actor,
+                                     args={"act": "provenance-backfill", "source_id": sid,
+                                           "segments": seg_counts[sid], "edges": len(edges)})
+            added += r.edges_added
+            print(f"{sid[:8]}  segments={seg_counts[sid]}  edges={len(edges)}  added={r.edges_added}")
+    finally:
+        await queue.stop()
+        manager.unload_capability(args.graph_capability)
+    print(f"backfilled DERIVED_FROM edges: {added} added of {total_edges} derived "
+          f"across {len(per_source)} sources (actor {actor})")
+    print(f"journal: {journal_path}")
+    return 0

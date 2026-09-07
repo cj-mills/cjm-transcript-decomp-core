@@ -123,3 +123,35 @@ def test_parallel_spines_disjoint_ids_and_split_metadata():
     assert all("split_policy" not in n["properties"] for n in base_nodes)
     assert all(n["properties"]["skeleton_hash"] == "sha256:skel-split" for n in split_nodes)
     assert all(n["properties"]["split_policy"] == "sentence-split/v1" for n in split_nodes)
+
+
+def test_segment_transcript_provenance_edges():
+    # finding 89b16be6: a Segment's text provenance is an EDGE, not only metadata —
+    # DERIVED_FROM per sliced Transcript, the authoritative one role=text_from, the
+    # others role=variant; an empty (audio-only) segment derives no text edge; and the
+    # wire-derived form (the backfill's input) reproduces the builder's edges exactly.
+    from cjm_transcript_decomp_core.graph import (provenance_edges_from_segment_wire,
+                                                  segment_provenance_edges)
+    roots = resolve_root_ids(SOURCE_ENTRY, CAPABILITIES)
+    tv = roots["audio_segments"][0]["transcripts"]["voxtral"]
+    tw = roots["audio_segments"][0]["transcripts"]["whisper"]
+    nodes, edges, ids = build_extension_payload(SOURCE_ENTRY, CAPABILITIES, "sha256:vad", "voxtral", _segments())
+    derived = [e for e in edges if e["relation_type"] == "DERIVED_FROM"]
+    # seg 0 slices voxtral + whisper (2 edges), seg 1 voxtral only (1), seg 2 empty (0)
+    assert len(derived) == 3
+    by_src = {}
+    for e in derived:
+        by_src.setdefault(e["source_id"], []).append(e)
+    s0 = {e["target_id"]: e["properties"]["role"] for e in by_src[ids["segments"][0]]}
+    assert s0 == {tv: "text_from", tw: "variant"}
+    assert [(e["target_id"], e["properties"]["role"]) for e in by_src[ids["segments"][1]]] == [(tv, "text_from")]
+    assert ids["segments"][2] not in by_src
+    # Deterministic ids from the triple: a rebuilt edge collides into the same id.
+    again = segment_provenance_edges(ids["segments"][0], [tw, tv], tv)
+    assert {e["id"] for e in again} == {e["id"] for e in by_src[ids["segments"][0]]}
+    # The backfill derivation (from the node's own refs) == the builder's edges.
+    for n in nodes:
+        assert provenance_edges_from_segment_wire(n) == by_src.get(n["id"], [])
+    # A projected query row carries text_from as a field, not under properties.
+    row = {"id": nodes[0]["id"], "text_from": tv, "sources": nodes[0]["sources"]}
+    assert provenance_edges_from_segment_wire(row) == by_src[nodes[0]["id"]]
