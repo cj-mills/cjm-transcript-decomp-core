@@ -6,7 +6,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 
 ## Modules
 
-- **`cjm_transcript_decomp_core`**
+- **`cjm_transcript_decomp_core.__init__`**
 - **`cjm_transcript_decomp_core.alignment`** — Pure forced-alignment logic (no capability calls): map FA words back to character spans in the original text, assign words to VAD chunks by timestamp, and build one text segment per VAD chunk. Extracted from the page-centric ForcedAlignmentService (Tier-1 logic).
 - **`cjm_transcript_decomp_core.cli`** — The CLI driver — the decomposition core's first (and currently only) frontend.
 - **`cjm_transcript_decomp_core.discovery`** — Capability-role discovery by manifest surface match — the journaling-by-
@@ -33,6 +33,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 
 ### `cjm_transcript_decomp_core.cli`
 
+- `backfill_provenance_command` _function_ — Execute `backfill-provenance`: mint the Segment -> Transcript DERIVED_FROM
 - `build_parser` _function_ — Build the CLI parser (subcommands: run).
 - `load_capabilities` _function_ — Discover manifests + load each requested capability (default instance).
 - `main` _function_ — CLI entry point (console script: `cjm-transcript-decomp-core`).
@@ -47,7 +48,9 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 
 - `SourceVerification` _class_ — Skeptical-lens verification of one Source's fine-spine extension under a
 - `build_extension_payload` _function_ — Build the fine-spine EXTENSION payload (pure; no capability calls).
+- `provenance_edges_from_segment_wire` _function_ — Derive a Segment's Transcript provenance edges from the node itself:
 - `resolve_root_ids` _function_ — Recompute the transcription-emitted root node ids from manifest data.
+- `segment_provenance_edges` _function_ — Text provenance as EDGES (finding 89b16be6, the references-must-be-edges
 - `verify_source` _function_ — Verify a Source's committed extension via server-side AGGREGATES (D13/D19).
 
 ### `cjm_transcript_decomp_core.launch`
@@ -121,4 +124,4 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 ## Dependencies
 
 **Depends on:** `cjm-capability-primitives`, `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-substrate`, `cjm-transcript-graph-schema`, `pyyaml`
-**Used by:** `cjm-transcript-decomp-qt`, `cjm-transcript-decomp-tui`
+**Used by:** `cjm-transcript-decomp-qt`
