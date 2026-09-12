@@ -245,3 +245,43 @@ def test_resolve_event_propsets_joins_each_set_to_its_source(tmp_path):
     # lone mismatched pointer over a lone source is NOT tolerated
     with pytest.raises(RuntimeError, match="no proposal set covers source 0"):
         resolve_event_propsets([b], sources[:1], ["inhale"])
+
+
+def test_alignment_composition_gates_runaway_text_by_words_per_second():
+    # 84f466bb: voxtral-mini's runaway loop ('some' × 24790) put a 24965-word
+    # text on a 219 s chunk; aligning it spiked the aligner to 15GB and the
+    # ratcheted peak deadlocked admission. The fold gate drops a transcriber's
+    # text denser than max_words_per_second for THIS chunk before any node is
+    # minted — no FA node for it, the meta row records the why — while the
+    # other transcriber's alignment proceeds untouched.
+    runaway = "Eight elements instead of one element." + " some" * 24959  # 6 + 24959 = 24965 words
+    speech = "word " * 600
+    segs = [
+        {"model_input_path": "/s0.wav", "start": 2192.45, "end": 2411.8,
+         "transcripts": {"whisper": {"text": speech}, "voxtral": {"text": runaway}}},
+        {"model_input_path": "/s1.wav", "start": 2411.8, "end": 2630.0,
+         "transcripts": {"whisper": {"text": runaway}, "voxtral": {"text": runaway}}},
+        {"model_input_path": "/s2.wav", "start": 2630.0,  # no `end`: duration unknown
+         "transcripts": {"whisper": {"text": speech}, "voxtral": {"text": runaway}}},
+    ]
+    comp, metas = build_alignment_composition(segs, "silero", "qwen3", ["whisper", "voxtral"],
+                                              max_words_per_second=8.0)
+    # pseg0: vad + whisper FA only; voxtral gated with the numbers on the row.
+    assert metas[0]["fa_nodes"] == {"whisper": "fa_t0_0000"}
+    why = metas[0]["implausible"]["voxtral"]
+    assert why["words"] == 24965.0 and abs(why["seconds"] - 219.35) < 0.01
+    assert why["words_per_second"] > 100.0
+    assert "voxtral" not in metas[0]["texts"]
+    # pseg1: EVERY transcriber gated -> skipped, with the gating recorded.
+    assert metas[1]["skipped"] is True
+    assert set(metas[1]["implausible"]) == {"whisper", "voxtral"}
+    # pseg2: no duration -> the gate cannot judge, both alignments proceed.
+    assert metas[2]["fa_nodes"] == {"whisper": "fa_t0_0002", "voxtral": "fa_t1_0002"}
+    assert "implausible" not in metas[2]
+    assert len(comp.nodes) == 2 + 3  # (vad + 1 FA) + (vad + 2 FA)
+
+    # Gate off (None / 0): the pre-gate shape — every non-empty text aligns.
+    comp0, metas0 = build_alignment_composition(segs, "silero", "qwen3", ["whisper", "voxtral"])
+    assert metas0[0]["fa_nodes"] == {"whisper": "fa_t0_0000", "voxtral": "fa_t1_0000"}
+    assert metas0[1]["skipped"] is False and "implausible" not in metas0[0]
+    assert len(comp0.nodes) == 9

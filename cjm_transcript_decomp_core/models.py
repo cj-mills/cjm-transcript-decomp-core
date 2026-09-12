@@ -126,6 +126,7 @@ class DecompConfig:
     event_propsets: List[str] = field(default_factory=list)  # Per-source ProposalSetManifest pointers (0.2.6, multi-source runs): each set joins ITS source by the manifest's own source binding (content hash, else path) — resolve_event_propsets refuses an uncovered source or a stray pointer loudly
     event_classes: List[str] = field(default_factory=lambda: ["inhale"])  # Proposal classes that carve (word-bearing classes like hesitation-marker must never cut)
     word_rescue: bool = True        # Run the post-carve word-rescue stage (96edc646 verdict bc7ece7b): authoritative FA words stranded outside every chunk get chunks minted — DEFAULT-ON (mis-homing is silent data corruption; opting out hides it)
+    max_words_per_second: float = 8.0  # Fold-level plausibility gate (finding 84f466bb): a transcriber's chunk text denser than this (words / chunk seconds) is a runaway repetition loop, not speech — its forced alignment is skipped with a journaled reason so the aligner never sees it (a 25k-word text on a 219 s chunk spiked FA to 15GB). 0 disables
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict snapshot for the manifest
         """Serialize to a plain dict."""

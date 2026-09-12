@@ -78,6 +78,11 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                           "absorption or VAD-missed speech in gaps — get chunks minted so "
                           "text homes where its audio is. DEFAULT-ON (mis-homing is silent "
                           "data corruption); --no-word-rescue opts out")
+    run.add_argument("--max-words-per-second", type=float, default=8.0,
+                     help="Fold-level plausibility gate (finding 84f466bb): a transcriber's "
+                          "chunk text denser than this (words / chunk seconds) is a runaway "
+                          "repetition loop, not speech — its forced alignment is skipped "
+                          "with a journaled reason so the aligner never sees it. 0 disables")
     run.add_argument("--event-split", action="store_true",
                      help="Run the post-FA event-carve stage (respine trial DEC 6cc10fb7): model "
                           "event spans from --event-propset become gaps between chunks "
@@ -205,6 +210,7 @@ async def run_command(
         event_propsets=list(args.event_propset or []),
         event_classes=list(args.event_classes),
         word_rescue=args.word_rescue,
+        max_words_per_second=args.max_words_per_second,
     )
     if cfg.event_split and not cfg.event_propsets:
         raise SystemExit("error: --event-split requires --event-propset (one per source)")

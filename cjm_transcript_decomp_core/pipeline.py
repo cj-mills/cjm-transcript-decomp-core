@@ -113,6 +113,7 @@ def build_alignment_composition(
     force: bool = False,       # Per-call cache-bypass control flag
     seg_id: Optional[str] = None,        # Sentence-segmentation capability instance id (B.5; None = no split stage)
     seg_text_from: Optional[str] = None,  # Authoritative transcriber whose text the segmenter reads
+    max_words_per_second: Optional[float] = None,  # Plausibility gate (84f466bb): drop a transcriber's text denser than this for the chunk; None/0 = no gate
 ) -> Tuple[Composition, List[Dict[str, Any]]]:  # (composition, per-pseg meta rows)
     """Build the whole-source M×(VAD ∥ T×FA ∥ SEG) composition (D8 fan-in, stage-5 variants).
 
@@ -142,8 +143,30 @@ def build_alignment_composition(
         texts = {t: str((transcripts.get(t) or {}).get("text") or "")
                  for t in transcribers if t in transcripts}
         nonempty = {t: x for t, x in texts.items() if x.strip()}
+        # Plausibility gate (finding 84f466bb): a runaway repetition loop is
+        # text far denser than speech for the chunk's duration (the live case:
+        # 24965 words on 219 s = 114 words/s; speech runs 2-4). Such a text is
+        # dropped from THIS chunk before any node is minted — its forced
+        # alignment (the 15GB spike behind the admission self-deadlock) never
+        # runs, the sentence split never reads it, and the meta row records
+        # what was gated and why so the run can journal it. Duration comes
+        # from the manifest's start/end (0.2.0 entries carry both).
+        implausible: Dict[str, Dict[str, float]] = {}
+        seg_end = float(pseg.get("end", seg_start) or seg_start)
+        seconds = max(seg_end - seg_start, 0.0)
+        if max_words_per_second and seconds > 0.0:
+            for t, x in list(nonempty.items()):
+                n_words = len(x.split())
+                wps = n_words / seconds
+                if wps > max_words_per_second:
+                    implausible[t] = {"words": float(n_words), "seconds": seconds,
+                                      "words_per_second": wps}
+                    del nonempty[t]
         if not nonempty:
-            metas.append({"skipped": True, "seg_start": seg_start, "pseg_index": i})
+            skipped = {"skipped": True, "seg_start": seg_start, "pseg_index": i}
+            if implausible:
+                skipped["implausible"] = implausible
+            metas.append(skipped)
             continue
         vad_n = f"vad_{i:04d}"
         # VAD via the task channel (vad/detect_speech); the adapter owns the cache
@@ -168,6 +191,8 @@ def build_alignment_composition(
             fa_nodes[t] = fa_n
         meta = {"skipped": False, "seg_start": seg_start, "pseg_index": i,
                 "vad_node": vad_n, "fa_nodes": fa_nodes, "texts": nonempty}
+        if implausible:
+            meta["implausible"] = implausible  # what the gate dropped here, and why
         if seg_id and seg_text_from in nonempty:
             seg_n = f"seg_{i:04d}"
             # Sentence segmentation via the task channel over the AUTHORITATIVE
@@ -189,6 +214,7 @@ async def decompose_source(
     transcribers: List[str],   # Transcriber names (manifest order)
     text_from: str,            # Authoritative transcriber (layer-0 text)
     event_spans: Optional[List[Tuple[float, float]]] = None,  # Model event spans (SOURCE seconds) to carve out (respine trial DEC 6cc10fb7); None = no event stage
+    gated_sink: Optional[List[Dict[str, Any]]] = None,  # Collects every plausibility-gated transcriber text (84f466bb) for the run's journal row; None = log only
 ) -> Tuple[str, List[DecompSegment]]:  # (source_path, ordered aligned segments)
     """Decompose one source into aligned fine segments with per-transcriber variants.
 
@@ -205,7 +231,19 @@ async def decompose_source(
     comp, metas = build_alignment_composition(
         seg_list, cfg.vad_capability, cfg.fa_capability, transcribers, force=cfg.force,
         seg_id=(cfg.seg_capability if cfg.sentence_split else None),
-        seg_text_from=text_from)
+        seg_text_from=text_from,
+        max_words_per_second=(cfg.max_words_per_second or None))
+    for m in metas:
+        for t, why in (m.get("implausible") or {}).items():
+            logger.warning(
+                f"[src {source_index}] pseg @ {m['seg_start']:.1f}s: {t!r} text gated as a "
+                f"runaway loop — {why['words']:.0f} words on {why['seconds']:.1f}s = "
+                f"{why['words_per_second']:.1f} words/s (> {cfg.max_words_per_second:g}); "
+                f"its alignment is skipped")
+            if gated_sink is not None:
+                gated_sink.append({"source_index": source_index, "source_path": source_path,
+                                   "pseg_index": m["pseg_index"], "seg_start": m["seg_start"],
+                                   "transcriber": t, **why})
     results: Dict[str, Any] = {}
     if comp.nodes:
         comp_id = await queue.submit_composition(comp)
@@ -490,6 +528,7 @@ async def run_decomp(
     # one authority carved them all.
     run_sources = src.get("sources", []) or []
     per_source_propsets: List[Tuple[Dict[str, Any], List[Tuple[float, float]], str]] = []
+    gated_transcripts: List[Dict[str, Any]] = []  # plausibility-gated texts across sources (84f466bb) -> RUN_FINISHED row
     if cfg.event_split:
         pointers = list(cfg.event_propsets) or ([cfg.event_propset] if cfg.event_propset else [])
         if not pointers:
@@ -546,7 +585,8 @@ async def run_decomp(
 
             source_path, aligned = await decompose_source(
                 queue, cfg, source, i, transcribers, text_from,
-                event_spans=(per_source_propsets[i][1] if cfg.event_split else None))
+                event_spans=(per_source_propsets[i][1] if cfg.event_split else None),
+                gated_sink=gated_transcripts)
             title = Path(source_path).stem or f"source-{i}"
 
             empty = sum(1 for a in aligned if not a.text.strip())
@@ -642,6 +682,11 @@ async def run_decomp(
         "core": "cjm-transcript-decomp-core", "status": status,
         "sources_completed": len(manifest.sources), "sources_total": len(sources),
         "segments": sum(s.segment_count for s in manifest.sources),
+        # Plausibility-gated transcriber texts (84f466bb): the journaled reason
+        # each skipped alignment leaves behind — which source/chunk/transcriber,
+        # how many words on how many seconds.
+        "gated_transcripts": len(gated_transcripts),
+        "gated": gated_transcripts,
     })
     return manifest
 
