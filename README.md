@@ -14,6 +14,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - **`cjm_transcript_decomp_core.launch`** — The shared launch surface every decomp shell drives through: the argument
 - **`cjm_transcript_decomp_core.models`** — Lean data shapes for the transcript-decomposition pipeline: in-core mirrors of the forced-alignment / VAD / text DTOs (no FastHTML deps), run configuration, the committed graph-segment carrier, and the decomposition run manifest (proto-bundle).
 - **`cjm_transcript_decomp_core.pipeline`** — The headless decomposition pipeline (stage 5: decomp is an EXTENDER). Load a transcription run manifest, verify the transcription-emitted graph root exists (the graph begins at transcription), then per source per pipeline-segment run VAD + per-transcriber forced alignment, build one aligned segment per VAD chunk with per-transcriber text variants, and attach the fine spine under the existing AudioSegment nodes via the layer's idempotent extend_graph — with HITL approval seams between alignment, commit, and the next source.
+- **`cjm_transcript_decomp_core.retire`** — Spine RETIREMENT + COMPACTION — safe removal of superseded decomposition spines (ruling a7617bd4, item eaefebd2).
 - **`cjm_transcript_decomp_core.runs`** — Run-manifest indexes for the decomp-batch TUI (work item 0ff6bf0f): the
 - **`cjm_transcript_decomp_core.segments`** — Fine-segment inspection for the decomp TUI (work item 166dd2b8, half a):
 - **`cjm_transcript_decomp_core.state`** — Sidecar TUI state: last-used batch settings persisted across sessions (the
@@ -38,6 +39,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `load_capabilities` _function_ — Discover manifests + load each requested capability (default instance).
 - `main` _function_ — CLI entry point (console script: `cjm-transcript-decomp-core`).
 - `run_command` _function_ — Execute the `run` subcommand: extend transcription-run manifest(s) with the fine spine.
+- `spine_command` _function_ — The spine retirement + compaction verbs (ruling a7617bd4; the machinery lives in
 
 ### `cjm_transcript_decomp_core.discovery`
 
@@ -91,6 +93,32 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `submit_and_wait` _function_ — Submit one capability job, wait for it, and return its result (raise on failure).
 - `vad_chunks_from_result` _function_ — Normalize a typed VAD result into segment-local VAD chunks.
 
+### `cjm_transcript_decomp_core.retire`
+
+- `annotate_spines` _function_ — Mark each spine row with its retirement state (pure; rows copied).
+- `apply_spine_fact` _function_ — Replay handler for spine-retire / spine-compaction: property merges on the Source.
+- `compact_retired` _function_ — The compact act over every retired, not-yet-compacted spine of the given sources:
+- `default_live_spine` _function_ — Which spine opens by default (pure). Preference is a DECLARED fact, never creation order:
+- `dependents_free` _function_
+- `dependents_map` _function_ — Every spine's dependents in one raw read (see DEPENDENTS_SQL); a spine absent from
+- `get_source` _function_ — The Source node as a dict (None when absent).
+- `journal_spine_retire` _function_ — Apply + journal one retirement fact (write-side dual of apply_spine_fact).
+- `list_sources` _function_ — Every Source (optionally one collection's members).
+- `list_spines` _function_ — The source's coexisting spines, grouped by skeleton hash and annotated with the retirement map.
+- `live_spines` _function_
+- `plan_retire` _function_ — Rules (a) + successor validation as a pure plan; the graph write is `journal_spine_retire`.
+- `plan_superseded` _function_ — The batch candidate list: every LIVE spine that is not the source's default (rule (c)) —
+- `resolve_source_id` _function_ — Resolve a human selector to ONE Source (refuses with the candidates).
+- `resolve_spine` _function_ — Resolve a picker-style selector to exactly one spine row (pure); refuses with the roster.
+- `retire_spine` _function_ — The whole retire act: list -> plan (rules a) -> dependents gate (rule b) -> journaled fact.
+- `retired_spines` _function_ — The Source's retirement map (pure): {spine key: {reason, successor, actor, ts[, compacted]}}.
+- `source_rendition_ids` _function_ — Every AudioRendition under a Source (all chains — retirement is per skeleton, not per chain).
+- `spine_dependents` _function_ — Rule (b)'s evidence: what on the graph points at the spine's segments.
+- `spine_fact_handlers` _function_
+- `spine_key` _function_
+- `spine_label` _function_
+- `spine_segment_ids` _function_
+
 ### `cjm_transcript_decomp_core.runs`
 
 - `DecompIndex` _class_ — Decomp-core run manifests read back: coverage chips for the batch stage
@@ -98,6 +126,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `SourceRunIndex` _class_ — Transcription-core run manifests — the decomp workflow's SOURCES — plus
 - `TrainingRunIndex` _class_ — Training-run manifests under the workspace training-runs/ dir — the
 - `group_batches` _function_ — Fold an ordered batch selection into headless hand-off groups.
+- `is_external_transcriber` _function_ — Whether a transcriber name is an external landing's (the `/manual` marker).
 
 ### `cjm_transcript_decomp_core.segments`
 
