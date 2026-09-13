@@ -479,18 +479,20 @@ async def compact_retired(
     for sid in source_ids:
         src = await get_source(queue, graph_id, sid)
         retired = retired_spines((src or {}).get("properties"))
-        if not retired:
+        pending = {k: e for k, e in retired.items() if not e.get("compacted")}
+        if not pending:
             continue
+        # The retirement map is the truth: read each retired spine's segment ids by its
+        # key directly (no spine listing — that 4-prop projection over EVERY segment of
+        # the source was the sweep's dominant cost).
         rends = await source_rendition_ids(queue, graph_id, sid)
-        spines = await list_spines(queue, graph_id, sid, rends)
-        for sp in spines:
-            key = spine_key(sp.get("skeleton_hash"))
-            e = retired.get(key)
-            if e is None or e.get("compacted"):
-                continue
-            seg_ids = await spine_segment_ids(queue, graph_id, rends, sp.get("skeleton_hash"))
+        for key, e in pending.items():
+            skel = None if key == LEGACY_KEY else key
+            seg_ids = await spine_segment_ids(queue, graph_id, rends, skel)
             if not seg_ids:
                 continue
+            sp = {"skeleton_hash": skel, "split_policy": None, "segments": len(seg_ids),
+                  "retired": True, "retired_reason": e.get("reason"), "successor": e.get("successor")}
             targets.append({"source_id": sid, "key": key, "spine": sp, "segment_ids": seg_ids})
             all_ids.extend(seg_ids)
     report: CompactReport = compact_journal(journal_path, archive_dir, all_ids, label=label,
