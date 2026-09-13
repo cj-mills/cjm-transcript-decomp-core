@@ -31,6 +31,7 @@ from cjm_transcript_decomp_core.graph import (build_extension_payload, resolve_r
 from cjm_transcript_decomp_core.models import (DecompConfig, DecompManifest, DecompSegment,
                                                DecompSourceRecord, FAWord, new_run_id,
                                                SegmentVariant, VADChunk)
+from cjm_transcript_decomp_core.runs import is_external_transcriber
 
 # Typed wire-kind registration (stage 2): importing the DTO classes is what
 # lets the proxy's wire_decode hand this host process TYPED results. All three
@@ -168,6 +169,13 @@ def build_alignment_composition(
                 skipped["implausible"] = implausible
             metas.append(skipped)
             continue
+        # Per-chunk authority (ruling 9ffce5f7 (4), second cut 2026-09-13): an
+        # operator-landed EXTERNAL variant (`<model id>/manual`) on this chunk
+        # is its layer-0 source — the escalation replaced a failed local text
+        # (a guard-truncated or gated runaway would otherwise leave the chunk
+        # empty); the run-wide `seg_text_from` governs every other chunk.
+        externals = [t for t in transcribers if t in nonempty and is_external_transcriber(t)]
+        chunk_text_from = externals[-1] if externals else seg_text_from
         vad_n = f"vad_{i:04d}"
         # VAD via the task channel (vad/detect_speech); the adapter owns the cache
         # + force. model_input is already model-ready (16k mono, converted upstream
@@ -190,15 +198,16 @@ def build_alignment_composition(
                                          control={"force": force}))
             fa_nodes[t] = fa_n
         meta = {"skipped": False, "seg_start": seg_start, "pseg_index": i,
-                "vad_node": vad_n, "fa_nodes": fa_nodes, "texts": nonempty}
+                "vad_node": vad_n, "fa_nodes": fa_nodes, "texts": nonempty,
+                "text_from": chunk_text_from}
         if implausible:
             meta["implausible"] = implausible  # what the gate dropped here, and why
-        if seg_id and seg_text_from in nonempty:
+        if seg_id and chunk_text_from in nonempty:
             seg_n = f"seg_{i:04d}"
-            # Sentence segmentation via the task channel over the AUTHORITATIVE
-            # transcriber's text (the split stage reads only that transcriber).
+            # Sentence segmentation via the task channel over THIS CHUNK's
+            # authoritative text (the split stage reads only that transcriber).
             nodes.append(CompositionNode(seg_n, seg_id,
-                                         {"text": nonempty[seg_text_from]},
+                                         {"text": nonempty[chunk_text_from]},
                                          task_name="sentence_segmentation",
                                          method="segment_text"))
             meta["seg_node"] = seg_n
@@ -264,6 +273,8 @@ async def decompose_source(
                            f"skipping pipeline segment")
             continue
         vad_chunks = vad_chunks_from_result(results[m["vad_node"]])
+        # THIS chunk's authority: an external landing when present, else the run-wide pick.
+        t_auth = str(m.get("text_from") or text_from)
 
         # Normalize each transcriber's FA output once (words + char spans).
         per_t_words: Dict[str, List[FAWord]] = {}
@@ -279,12 +290,12 @@ async def decompose_source(
         # boundaries come from the segmentation capability's char spans over the
         # authoritative text, mapped onto FA words. Chunks the authoritative
         # transcriber has no words for (montage/textless) pass through whole.
-        if cfg.sentence_split and text_from in per_t_words and m.get("seg_node"):
+        if cfg.sentence_split and t_auth in per_t_words and m.get("seg_node"):
             sentence_spans = sentence_spans_from_result(results[m["seg_node"]])
-            end_words = sentence_end_word_indices(per_t_spans[text_from], sentence_spans)
+            end_words = sentence_end_word_indices(per_t_spans[t_auth], sentence_spans)
             n_before = len(vad_chunks)
             vad_chunks = split_chunks_at_sentence_gaps(
-                vad_chunks, per_t_words[text_from], end_words,
+                vad_chunks, per_t_words[t_auth], end_words,
                 min_chunk_s=cfg.split_min_chunk_s)
             if len(vad_chunks) != n_before:
                 logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s: "
@@ -309,11 +320,11 @@ async def decompose_source(
         # chunk (carve-sliver absorption OR VAD-missed speech in gaps) get
         # chunks minted for them BEFORE the fold, so assign_words_to_chunks
         # homes them correctly instead of gluing them to the nearest chunk.
-        if cfg.word_rescue and text_from in per_t_words:
+        if cfg.word_rescue and t_auth in per_t_words:
             local_ev = ([(s - seg_start, e - seg_start) for s, e in event_spans]
                         if event_spans else None)
             n_before = len(vad_chunks)
-            vad_chunks = rescue_gap_words(vad_chunks, per_t_words[text_from],
+            vad_chunks = rescue_gap_words(vad_chunks, per_t_words[t_auth],
                                           event_spans=local_ev)
             if len(vad_chunks) != n_before:
                 logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s: "
@@ -327,13 +338,16 @@ async def decompose_source(
                 assignments=assign_words_to_chunks(per_t_words[t], vad_chunks),
                 num_chunks=len(vad_chunks), source_provider_id=t,
             )
-        auth = per_t_segments.get(text_from)
+        auth = per_t_segments.get(t_auth)
         if auth is not None:
             for w in tier1_alignment_checks(auth, vad_chunks):
-                logger.warning(f"[src {source_index}] pseg @ {seg_start:.1f}s [{text_from}]: {w}")
+                logger.warning(f"[src {source_index}] pseg @ {seg_start:.1f}s [{t_auth}]: {w}")
+            if t_auth != text_from:
+                logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s: layer-0 text from the "
+                            f"external landing {t_auth!r} (overrides {text_from!r} on this chunk)")
         else:
             logger.warning(f"[src {source_index}] pseg @ {seg_start:.1f}s: authoritative "
-                           f"transcriber {text_from!r} has no text here — layer-0 text empty")
+                           f"transcriber {t_auth!r} has no text here — layer-0 text empty")
 
         for k, vc in enumerate(vad_chunks):
             variants = []
@@ -351,7 +365,7 @@ async def decompose_source(
                 start_time=seg_start + vc.start_time, end_time=seg_start + vc.end_time,
                 chunk_start=vc.start_time, chunk_end=vc.end_time,
                 vad_chunk_index=vc.index, pseg_index=m["pseg_index"],
-                variants=variants,
+                variants=variants, text_from=t_auth,
             ))
             global_index += 1
         logger.info(f"[src {source_index}] pseg @ {seg_start:.1f}s -> "

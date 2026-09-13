@@ -285,3 +285,27 @@ def test_alignment_composition_gates_runaway_text_by_words_per_second():
     assert metas0[0]["fa_nodes"] == {"whisper": "fa_t0_0000", "voxtral": "fa_t1_0000"}
     assert metas0[1]["skipped"] is False and "implausible" not in metas0[0]
     assert len(comp0.nodes) == 9
+
+
+def test_alignment_composition_external_landing_is_the_chunk_authority():
+    """Ruling 9ffce5f7 (4), second cut (2026-09-13 empty-escalated-chunks sighting): an
+    operator-landed external variant (`<model id>/manual`) on a chunk is THAT chunk's
+    layer-0 source — the meta names it, the sentence split reads it — while the run-wide
+    authority governs every other chunk; a gated (implausible) local text on the same
+    chunk changes nothing."""
+    segs = [
+        {"start": 0.0, "end": 100.0, "model_input_path": "/s0.wav",
+         "transcripts": {"whisper": {"text": "Alpha."}, "voxtral": {"text": "Alfa."}}},
+        {"start": 100.0, "end": 200.0, "model_input_path": "/s1.wav",
+         "transcripts": {"whisper": {"text": "Beta."}, "voxtral": {"text": "the " * 5000},
+                         "gemini-3.8-flash/manual": {"text": "Beta, the real words."}}},
+    ]
+    comp, metas = build_alignment_composition(
+        segs, "silero", "qwen3", ["whisper", "voxtral", "gemini-3.8-flash/manual"],
+        seg_id="pysbd", seg_text_from="voxtral", max_words_per_second=8.0)
+    assert metas[0]["text_from"] == "voxtral", "no external variant -> the run-wide authority"
+    assert metas[1]["text_from"] == "gemini-3.8-flash/manual", "an external landing overrides on its chunk"
+    assert "voxtral" in metas[1]["implausible"] and "voxtral" not in metas[1]["fa_nodes"]
+    by_name = {n.id: n for n in comp.nodes}
+    assert by_name[metas[1]["seg_node"]].kwargs == {"text": "Beta, the real words."}
+    assert by_name[metas[0]["seg_node"]].kwargs == {"text": "Alfa."}

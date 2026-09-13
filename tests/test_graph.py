@@ -179,3 +179,20 @@ def test_resolve_root_ids_honours_a_per_entry_config_hash():
     roots2 = resolve_root_ids(entry2, CAPABILITIES)
     assert "gemini-2.5-pro/manual" in roots2["audio_segments"][0]["transcripts"]
     assert "gemini-2.5-pro/manual" not in roots2["audio_segments"][1]["transcripts"]
+
+
+def test_segment_text_from_override_records_the_external_variant():
+    """A DecompSegment carrying its own text_from (an external landing on that chunk)
+    records THAT Transcript as the segment's text source; segments without one keep
+    the run-wide authority."""
+    entry = {**SOURCE_ENTRY, "segments": [
+        {**SOURCE_ENTRY["segments"][0],
+         "transcripts": {"whisper": {}, "voxtral": {}, "gemini-3.8-flash/manual": {"config_hash": "sha256:ext"}}},
+        SOURCE_ENTRY["segments"][1]]}
+    roots = resolve_root_ids(entry, CAPABILITIES)
+    segs = _segments()
+    segs[0] = DecompSegment(**{**segs[0].__dict__, "text_from": "gemini-3.8-flash/manual",
+                               "variants": [SegmentVariant("gemini-3.8-flash/manual", "Alpha.", 0, 6)]})
+    nodes, edges, ids = build_extension_payload(entry, CAPABILITIES, "sha256:vad", "voxtral", segs)
+    assert nodes[0]["properties"]["text_from"] == roots["audio_segments"][0]["transcripts"]["gemini-3.8-flash/manual"]
+    assert nodes[1]["properties"]["text_from"] == roots["audio_segments"][0]["transcripts"]["voxtral"]

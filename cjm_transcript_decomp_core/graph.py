@@ -112,7 +112,8 @@ def build_extension_payload(
             chunk_start=seg.chunk_start, chunk_end=seg.chunk_end,
             index=seg.index, start_time=seg.start_time, end_time=seg.end_time,
             text=seg.text, audio_hash=a["model_input_hash"], source=source_id,
-            text_from=(a["transcripts"].get(text_from) if seg.text.strip() else None),
+            text_from=(a["transcripts"].get(getattr(seg, "text_from", None) or text_from)
+                       if seg.text.strip() else None),  # per-chunk authority (an external landing) wins
             split_policy=split_policy, text_slices=slices,
         )
         nodes.append(node.to_graph_node())

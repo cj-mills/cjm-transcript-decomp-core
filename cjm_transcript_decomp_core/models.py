@@ -100,6 +100,7 @@ class DecompSegment:
     vad_chunk_index: int   # Chunk index within its pipeline segment
     pseg_index: int        # Owning pipeline-segment (AudioSegment) index within the source
     variants: List[SegmentVariant] = field(default_factory=list)  # Per-transcriber chunk texts + char ranges
+    text_from: Optional[str] = None  # The transcriber whose alignment `text` is (None = the run-wide authority); an external landing overrides it per chunk (9ffce5f7 (4), second cut)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form
         """Serialize to a plain dict."""
