@@ -53,9 +53,13 @@ def resolve_root_ids(
         start, end = float(pseg.get("start", 0.0)), float(pseg.get("end", 0.0))
         aseg_id = audio_segment_node_id(source_id, start, end)
         rendition_id = audio_rendition_node_id(aseg_id, chain)
+        # A derived manifest's re-run / external-landing entry carries its OWN
+        # config_hash (ruling 910f3692 (1)): the per-entry hash wins over the
+        # run-level capabilities block for THAT chunk only.
         transcripts = {
-            t: transcript_node_id(rendition_id, t, str((capabilities_info.get(t) or {}).get("config_hash") or ""))
-            for t in (pseg.get("transcripts") or {})
+            t: transcript_node_id(rendition_id, t, str((entry or {}).get("config_hash")
+                                                       or (capabilities_info.get(t) or {}).get("config_hash") or ""))
+            for t, entry in (pseg.get("transcripts") or {}).items()
         }
         asegs.append({"audio_segment": aseg_id, "rendition": rendition_id,
                       "start": start, "end": end,

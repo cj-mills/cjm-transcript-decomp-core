@@ -155,3 +155,27 @@ def test_segment_transcript_provenance_edges():
     # A projected query row carries text_from as a field, not under properties.
     row = {"id": nodes[0]["id"], "text_from": tv, "sources": nodes[0]["sources"]}
     assert provenance_edges_from_segment_wire(row) == by_src[nodes[0]["id"]]
+
+
+def test_resolve_root_ids_honours_a_per_entry_config_hash():
+    """Ruling 910f3692 (1): a DERIVED manifest's re-run / external-landing entry carries its
+    OWN config_hash — the id recomputation takes it over the run-level capabilities block for
+    THAT chunk only; every other chunk keeps the run-level identity."""
+    entry = {**SOURCE_ENTRY, "segments": [
+        {**SOURCE_ENTRY["segments"][0],
+         "transcripts": {"whisper": {}, "voxtral": {"text": "re-run", "config_hash": "sha256:cv-new"}}},
+        SOURCE_ENTRY["segments"][1],
+    ]}
+    roots = resolve_root_ids(entry, CAPABILITIES)
+    r0, r1 = roots["audio_segments"]
+    assert r0["transcripts"]["voxtral"] == transcript_node_id(r0["rendition"], "voxtral", "sha256:cv-new")
+    assert r0["transcripts"]["whisper"] == transcript_node_id(r0["rendition"], "whisper", "sha256:cw")
+    assert r1["transcripts"]["voxtral"] == transcript_node_id(r1["rendition"], "voxtral", "sha256:cv")
+    # A transcriber present on only SOME chunks (an external landing) resolves where it has an entry.
+    entry2 = {**entry, "segments": [
+        {**entry["segments"][0], "transcripts": {**entry["segments"][0]["transcripts"],
+                                                 "gemini-2.5-pro/manual": {"text": "x", "config_hash": "sha256:ext"}}},
+        entry["segments"][1]]}
+    roots2 = resolve_root_ids(entry2, CAPABILITIES)
+    assert "gemini-2.5-pro/manual" in roots2["audio_segments"][0]["transcripts"]
+    assert "gemini-2.5-pro/manual" not in roots2["audio_segments"][1]["transcripts"]
