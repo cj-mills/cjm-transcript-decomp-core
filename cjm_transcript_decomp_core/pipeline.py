@@ -709,11 +709,14 @@ def decomp_replay_handlers() -> Dict[str, Any]:  # verb -> async handler(queue, 
     """The decomp core's replay vocabulary (DEC 426658f1, replay stays DOMAIN-OWNED).
 
     Exported through the `cjm_context_graph_layer.replay` entry-point group and
-    unioned by `composed_replay_handlers`. Both verbs are `journal_extend` ops —
-    wire-carrying by construction — so they register the layer's shared
+    unioned by `composed_replay_handlers`. The two extension verbs are `journal_extend`
+    ops — wire-carrying by construction — so they register the layer's shared
     `apply_wires` (identity-comparable across cores: transcription also emits
-    `derivation`, and the shared handler keeps that collision legal)."""
-    return wires_handlers("spine-extension", "derivation")
+    `derivation`, and the shared handler keeps that collision legal). The two spine
+    FACT verbs (spine-retire / spine-compaction, ruling a7617bd4) are property merges
+    on the Source and replay through `apply_spine_fact`."""
+    from cjm_transcript_decomp_core.retire import spine_fact_handlers
+    return {**wires_handlers("spine-extension", "derivation"), **spine_fact_handlers()}
 
 
 def sentence_spans_from_result(

@@ -35,3 +35,17 @@ def test_batch_manifests():
                          "--text-from", "cjm-capability-voxtral-hf"])
     assert args.manifests == ["a.json", "b.json", "c.json"]
     assert args.text_from == "cjm-capability-voxtral-hf"
+
+
+def test_spine_verbs_parse():
+    # ruling a7617bd4: list-spines / retire-spine / retire-superseded / compact-spines
+    p = build_parser()
+    a = p.parse_args(["retire-spine", "--source", "Lecture 37", "--skeleton", "abc1", "--successor", "legacy",
+                      "--reason", "prefer previous", "--graph-db-path", "/tmp/g.db"])
+    assert a.command == "retire-spine" and a.successor == "legacy" and not a.unretire
+    b = p.parse_args(["retire-superseded", "--collection", "GPU MODE", "--dry-run"])
+    assert b.command == "retire-superseded" and b.reason == "superseded" and b.dry_run
+    c = p.parse_args(["compact-spines", "--dry-run", "--prove-rebuild", "/tmp/fresh.db"])
+    assert c.command == "compact-spines" and c.archive_dir is None and c.prove_rebuild == "/tmp/fresh.db"
+    d = p.parse_args(["list-spines", "--dependents"])
+    assert d.command == "list-spines" and d.dependents and d.source is None

@@ -24,6 +24,7 @@ import asyncio
 import getpass
 import logging
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -140,6 +141,71 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
     bp.add_argument("--dry-run", action="store_true",
                     help="Count the edges per source; touch neither graph nor journal")
     bp.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging")
+
+    # ---- spine retirement + compaction (ruling a7617bd4, item eaefebd2) ----
+    def _spine_plumbing(p: argparse.ArgumentParser) -> None:  # shared by the four spine verbs
+        p.add_argument("--manifests-dir", default=".cjm/manifests", help="Capability manifests directory")
+        p.add_argument("--graph-capability", default="cjm-capability-graph-sqlite",
+                       help="Graph-storage capability name")
+        p.add_argument("--graph-db-path", default=None,
+                       help="Graph db path (default: the workspace capability config)")
+        p.add_argument("--workspace", default=None,
+                       help="Workspace root (default: CJM_WORKSPACE env, else upward walk from cwd)")
+        p.add_argument("--actor", default=None, help="Journal attribution (default: cli:<username>)")
+        p.add_argument("-v", "--verbose", action="store_true", help="DEBUG-level logging")
+    ls = sub.add_parser(
+        "list-spines",
+        help="The coexisting skeleton spines of a source (or every source) with their retirement "
+             "state and, with --dependents, what on the graph points at each (corrections / reviews)")
+    ls.add_argument("--source", default=None,
+                    help="Source id, id prefix, or title substring (default: every source)")
+    ls.add_argument("--collection", default=None, help="Restrict to one Collection title")
+    ls.add_argument("--dependents", action="store_true",
+                    help="Count corrections / reviews / sessions per spine (slower: edge reads)")
+    _spine_plumbing(ls)
+    rs = sub.add_parser(
+        "retire-spine",
+        help="Retire ONE spine of a source as a journaled FACT (spine-retire): pickers, loaders and "
+             "the census skip it; reversible with --unretire. Rule (a): refuses when the source "
+             "would be left with no live spine; the successor may be ANY live spine, an older "
+             "one included. Rule (b): refuses with a listing while corrections / reviews / "
+             "sessions depend on it — nothing cascades")
+    rs.add_argument("--source", required=True, help="Source id, id prefix, or title substring")
+    rs.add_argument("--skeleton", required=True,
+                    help="Which spine: 'legacy' or a skeleton-hash prefix (see list-spines)")
+    rs.add_argument("--successor", default=None,
+                    help="The live spine that takes over (selector; default: none declared)")
+    rs.add_argument("--reason", default="", help="Why (journaled; e.g. superseded, wrong-config)")
+    rs.add_argument("--unretire", action="store_true", help="Reverse a retirement instead")
+    _spine_plumbing(rs)
+    rsup = sub.add_parser(
+        "retire-superseded",
+        help="BATCH rule (c): for every source, retire each live spine that is not the source's "
+             "default (the declared successor, else the newest live spine) and has NO "
+             "dependents, naming the default as successor; spines with dependents are listed "
+             "and left alone. --dry-run lists the plan")
+    rsup.add_argument("--collection", default=None, help="Restrict to one Collection title")
+    rsup.add_argument("--source", default=None, help="Restrict to one source (id prefix or title substring)")
+    rsup.add_argument("--reason", default="superseded", help="Reason journaled on each retirement")
+    rsup.add_argument("--dry-run", action="store_true", help="Print the plan; retire nothing")
+    _spine_plumbing(rsup)
+    cs = sub.add_parser(
+        "compact-spines",
+        help="Move every RETIRED, not-yet-compacted spine's wires out of the active journal into "
+             "the archive family (one journal pass), delete its segments from the live db, and "
+             "journal a spine-compaction fact naming the archive. Refuses before writing if any "
+             "kept op still references a retired segment. Run at session END after cg-backup")
+    cs.add_argument("--collection", default=None, help="Restrict to one Collection title")
+    cs.add_argument("--source", default=None, help="Restrict to one source (id prefix or title substring)")
+    cs.add_argument("--archive-dir", default=None,
+                    help="Archive directory (default: <journal dir>/archive — NOT globbed by cg-backup)")
+    cs.add_argument("--label", default=None, help="Compaction label (default: compact-<timestamp>)")
+    cs.add_argument("--dry-run", action="store_true",
+                    help="Scan + report what would move (and any dangling reference); write nothing")
+    cs.add_argument("--prove-rebuild", default=None, metavar="TMP_DB",
+                    help="After compacting, rebuild the compacted journal into TMP_DB (fresh path) "
+                         "and compare id-set digests with the live db (P-49); slow at scale")
+    _spine_plumbing(cs)
     return parser
 
 
@@ -312,6 +378,8 @@ def main(
         return asyncio.run(run_command(args))
     if args.command == "backfill-provenance":
         return asyncio.run(backfill_provenance_command(args))
+    if args.command in ("list-spines", "retire-spine", "retire-superseded", "compact-spines"):
+        return asyncio.run(spine_command(args))
     raise SystemExit(f"unknown command: {args.command}")
 
 
@@ -387,3 +455,146 @@ async def backfill_provenance_command(
           f"across {len(per_source)} sources (actor {actor})")
     print(f"journal: {journal_path}")
     return 0
+
+
+async def spine_command(
+    args: argparse.Namespace,  # Parsed arguments for list-spines / retire-spine / retire-superseded / compact-spines
+) -> int:  # Process exit code
+    """The spine retirement + compaction verbs (ruling a7617bd4; the machinery lives in
+    `retire.py`). One graph stack for the whole act; every write is journaled; refusals
+    (rules (a)/(b), dangling references) print and exit 2 — nothing partial lands."""
+    from cjm_transcript_decomp_core import retire as R
+
+    ws = resolve_workspace(explicit=getattr(args, "workspace", None))
+    if ws is not None:
+        os.environ["CJM_WORKSPACE"] = str(ws.root)
+    manager = CapabilityManager(search_paths=[Path(args.manifests_dir)])
+    configs = ({args.graph_capability: {"db_path": args.graph_db_path}}
+               if args.graph_db_path else None)
+    load_capabilities(manager, [args.graph_capability], configs=configs)
+    effective = args.graph_db_path or (
+        (manager.instances[args.graph_capability].config or {}).get("db_path"))
+    if not effective:
+        raise SystemExit("no graph db path: pass --graph-db-path, or persist one on the "
+                         f"{args.graph_capability} instance in the active workspace's config store")
+    journal_path = sidecar_journal_path(str(effective))
+    actor = args.actor or f"cli:{getpass.getuser()}"
+    gid = args.graph_capability
+    queue = JobQueue(deps=manager)
+    await queue.start()
+    try:
+        if args.command == "list-spines":
+            sources = ([await R.resolve_source_id(queue, gid, args.source)] if args.source
+                       else await R.list_sources(queue, gid, collection=args.collection))
+            for sid, title in sources:
+                rends = await R.source_rendition_ids(queue, gid, sid)
+                spines = await R.list_spines(queue, gid, sid, rends)
+                default = R.default_live_spine(spines)
+                print(f"{sid[:8]}  {title}  ({len(spines)} spine(s), "
+                      f"{sum(1 for s in spines if s.get('retired'))} retired)")
+                for sp in spines:
+                    mark = "*" if default is not None and sp is default else " "
+                    line = (f"  {mark} {R.spine_label(sp):48} {sp.get('segments', 0):>6} segs  "
+                            f"born {time.strftime('%Y-%m-%d %H:%M', time.localtime(sp.get('created_at') or 0))}")
+                    if sp.get("retired"):
+                        line += (f"  [{sp.get('retired_reason') or 'retired'}"
+                                 f"{' -> ' + str(sp.get('successor'))[:16] if sp.get('successor') else ''}"
+                                 f"{' · COMPACTED' if sp.get('compacted') else ''}]")
+                    if args.dependents:
+                        ids = await R.spine_segment_ids(queue, gid, rends, sp.get("skeleton_hash"))
+                        dep = await R.spine_dependents(queue, gid, ids)
+                        line += (f"  deps: {dep['corrections']} corr / {dep['reviews']} rev / "
+                                 f"{len(dep['sessions'])} sess")
+                    print(line)
+            return 0
+        if args.command == "retire-spine":
+            sid, title = await R.resolve_source_id(queue, gid, args.source)
+            try:
+                r = await R.retire_spine(queue, gid, sid, args.skeleton, reason=args.reason,
+                                         successor=args.successor, unretire=args.unretire,
+                                         journal_path=journal_path, actor=actor)
+            except ValueError as e:
+                print(f"REFUSED: {e}")
+                return 2
+            p = r["plan"]
+            print(f"{p['act']}: {title} · {R.spine_label(p['spine'])}"
+                  + (f" -> successor {p['entry'].get('successor')}" if p["entry"].get("successor") else ""))
+            print(f"journal: {journal_path}")
+            return 0
+        if args.command == "retire-superseded":
+            sources = ([await R.resolve_source_id(queue, gid, args.source)] if args.source
+                       else await R.list_sources(queue, gid, collection=args.collection))
+            titles = dict(sources)
+            dep_map = await R.dependents_map(queue, gid)  # one raw read for the whole sweep
+            plan = await R.plan_superseded(queue, gid, [s for s, _ in sources], dep_map=dep_map)
+            eligible = [row for row in plan if row["eligible"]]
+            held = [row for row in plan if not row["eligible"]]
+            for row in plan:
+                dep = row["dependents"]
+                print(f"{'RETIRE' if row['eligible'] else 'HOLD  '}  {row['source_id'][:8]} "
+                      f"{titles.get(row['source_id'], '')[:40]:40}  {R.spine_label(row['spine']):40} "
+                      f"{row['segments']:>6} segs -> {R.spine_label(row['successor'])}"
+                      + ("" if row["eligible"] else
+                         f"  ({dep['corrections']} corr / {dep['reviews']} rev / {len(dep['sessions'])} sess)"))
+            print(f"{len(eligible)} eligible, {len(held)} held (dependents), "
+                  f"{sum(r['segments'] for r in eligible)} segments to retire")
+            if args.dry_run:
+                print("dry run: nothing retired")
+                return 0
+            done = 0
+            for row in eligible:
+                try:
+                    await R.retire_spine(queue, gid, row["source_id"],
+                                         row["spine"].get("skeleton_hash") or R.LEGACY_KEY,
+                                         reason=args.reason,
+                                         successor=row["successor"].get("skeleton_hash") or R.LEGACY_KEY,
+                                         journal_path=journal_path, actor=actor, dep_map=dep_map)
+                    done += 1
+                except ValueError as e:
+                    print(f"REFUSED {row['source_id'][:8]} {R.spine_label(row['spine'])}: {e}")
+            print(f"retired {done}/{len(eligible)} spine(s); journal: {journal_path}")
+            return 0 if done == len(eligible) else 2
+        if args.command == "compact-spines":
+            from cjm_context_graph_layer.compact import CompactRefusal
+            sources = ([await R.resolve_source_id(queue, gid, args.source)] if args.source
+                       else await R.list_sources(queue, gid, collection=args.collection))
+            archive_dir = args.archive_dir or str(Path(journal_path).parent / "archive")
+            label = args.label or time.strftime("compact-%Y%m%d_%H%M%S")
+            try:
+                r = await R.compact_retired(queue, gid, [s for s, _ in sources], journal_path=journal_path,
+                                            archive_dir=archive_dir, label=label, actor=actor,
+                                            dry_run=args.dry_run)
+            except CompactRefusal as e:
+                print(f"REFUSED: {e}")
+                return 2
+            rep = r["report"]
+            for t in r["targets"]:
+                print(f"  {t['source_id'][:8]}  {R.spine_label(t['spine']):40} {len(t['segment_ids']):>6} segs")
+            print(rep.summary())
+            if not args.dry_run:
+                print(f"live db: {r['deleted']} node(s) deleted; post-scan dangling references: "
+                      f"{r['dangling_after']}")
+                if r["dangling_after"]:
+                    print("WARNING: the family still names retired ids — inspect before the next rebuild")
+                    return 2
+            if args.prove_rebuild and not args.dry_run:
+                from cjm_context_graph_layer.rebuild import digests_equal, idset_digest, rebuild_db
+                if Path(args.prove_rebuild).exists():
+                    raise SystemExit(f"--prove-rebuild target exists: {args.prove_rebuild} (needs a fresh path)")
+                await queue.stop()  # the rebuild stands up its own stack on the fresh db
+                counts = await rebuild_db(args.prove_rebuild, journal_path, args.manifests_dir,
+                                          graph_capability=gid)
+                live, fresh = idset_digest(str(effective)), idset_digest(args.prove_rebuild)
+                ok = digests_equal(live, fresh)
+                print(f"proof: rebuilt {sum(v for k, v in counts.items() if k.endswith('_added'))} wire(s); "
+                      f"live nodes/edges {live['nodes']}/{live['edges']} vs rebuilt "
+                      f"{fresh['nodes']}/{fresh['edges']} — {'EQUAL' if ok else 'DIFFER'}")
+                return 0 if ok else 2
+            return 0
+        raise SystemExit(f"unknown spine command: {args.command}")
+    finally:
+        try:
+            await queue.stop()
+        except Exception:
+            pass
+        manager.unload_capability(gid)
