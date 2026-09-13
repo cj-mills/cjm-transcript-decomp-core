@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from cjm_substrate.core.workspace import resolve_recorded_tree
 from cjm_substrate.utils.lifecycle import partition_lifecycle
+from cjm_transcript_graph_schema.schema import EXTERNAL_TRANSCRIBER_MARKER
 
 
 def _load_manifests(
@@ -86,13 +87,19 @@ class SourceRunIndex:
 
     @classmethod
     def default_text_from(cls, m: Dict[str, Any]) -> Optional[str]:  # Pre-picked authoritative transcriber
-        """The default --text-from pick: the sole transcriber, else the LAST.
+        """The default --text-from pick: the sole transcriber, else the LAST
+        LOCAL one.
 
         The transcription TUI's confirmed pair lands [lightweight, accuracy],
-        so last = the accuracy model — the natural layer-0 authority. A
-        CONVENTION default only: the row paints it and t cycles it, so a
-        hand-built manifest with a different order is one keypress away."""
-        t = cls.transcribers(m)
+        so last = the accuracy model — the natural layer-0 authority. An
+        EXTERNAL landing (`<model id>/manual`, appended by add-transcript) is
+        never the default: it has text only on the chunks the operator
+        escalated, so folding from it leaves every other chunk EMPTY (the
+        2026-09-12 GPU MODE sighting; ruling 9ffce5f7 (4) keeps the local
+        model authoritative). A CONVENTION default only: the row paints it
+        and t cycles it, so a hand-built manifest with a different order is
+        one keypress away."""
+        t = [x for x in cls.transcribers(m) if not is_external_transcriber(x)]
         return t[-1] if t else None
 
     @staticmethod
@@ -388,3 +395,10 @@ class TrainingRunIndex:
         if created:
             parts.append(time.strftime("%Y-%m-%d", time.localtime(float(created))))
         return " · ".join(parts)
+
+
+def is_external_transcriber(
+    name: str,  # A transcriber instance id (manifest `transcripts` key)
+) -> bool:  # True for an operator-landed external variant (`<model id>/manual`)
+    """Whether a transcriber name is an external landing's (the `/manual` marker)."""
+    return str(name).endswith(EXTERNAL_TRANSCRIBER_MARKER)

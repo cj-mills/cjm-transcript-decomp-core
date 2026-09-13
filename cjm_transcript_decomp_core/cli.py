@@ -36,6 +36,7 @@ from cjm_substrate.core.workspace import resolve_workspace
 from cjm_transcript_decomp_core.graph import provenance_edges_from_segment_wire
 from cjm_transcript_decomp_core.models import DecompConfig
 from cjm_transcript_decomp_core.pipeline import load_source_manifest, run_decomp
+from cjm_transcript_graph_schema.schema import EXTERNAL_TRANSCRIBER_MARKER
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +195,7 @@ async def run_command(
         vad_capability=args.vad_capability,
         fa_capability=args.fa_capability,
         graph_capability=args.graph_capability,
-        text_from=args.text_from,
+        text_from=_refuse_external_authority(args.text_from),
         language=args.language,
         force=args.force,
         assume_yes=args.yes,
@@ -283,6 +284,19 @@ async def run_command(
             except Exception as e:  # Best-effort teardown; never mask the run's outcome
                 logger.warning(f"unload {iid} failed: {e}")
     return 0 if all_ok else 1
+
+
+def _refuse_external_authority(
+    text_from: Optional[str],  # The --text-from value (None = the pipeline's own default)
+) -> Optional[str]:  # The value, unchanged
+    """Ruling 9ffce5f7 (4): the layer-0 authority is a LOCAL transcriber — an external
+    landing (`<model id>/manual`) has text only on the chunks the operator escalated,
+    so folding from it leaves every other chunk empty. Refuse loudly instead."""
+    if text_from and str(text_from).endswith(EXTERNAL_TRANSCRIBER_MARKER):
+        raise SystemExit(f"--text-from {text_from!r} names an EXTERNAL transcriber (an operator "
+                         "landing present only on escalated chunks) — pick the local model "
+                         "(e.g. whisper--small); per-chunk authority override is not built (9ffce5f7 (4))")
+    return text_from
 
 
 def main(

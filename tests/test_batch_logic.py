@@ -424,3 +424,24 @@ def test_lifecycle_archived_artifacts_leave_pickers_and_misses_are_loud(tmp_path
     assert [m["proposal_set_id"][-8:] for m in pidx.for_source("sha256:xx")] \
         == ["aaaaaaaa"]
     assert [m["proposal_set_id"][-8:] for m in pidx.archived] == ["bbbbbbbb"]
+
+
+def test_default_text_from_never_picks_an_external_landing():
+    """An add-transcript derived manifest appends `<model id>/manual` LAST; the default
+    authority stays the last LOCAL transcriber (the 2026-09-12 empty-spine sighting)."""
+    from cjm_transcript_decomp_core.runs import is_external_transcriber
+    m = {"config": {"transcriber_capabilities": ["whisper--small", "cjm-capability-voxtral-hf",
+                                                 "gemini-3.8-flash/manual"]}}
+    assert SourceRunIndex.default_text_from(m) == "cjm-capability-voxtral-hf"
+    only_ext = {"config": {"transcriber_capabilities": ["gemini-3.8-flash/manual"]}}
+    assert SourceRunIndex.default_text_from(only_ext) is None
+    assert is_external_transcriber("gemini-3.8-flash/manual") and not is_external_transcriber("whisper--small")
+
+
+def test_cli_refuses_an_external_authority():
+    import pytest
+    from cjm_transcript_decomp_core.cli import _refuse_external_authority
+    assert _refuse_external_authority("whisper--small") == "whisper--small"
+    assert _refuse_external_authority(None) is None
+    with pytest.raises(SystemExit):
+        _refuse_external_authority("gemini-3.8-flash/manual")
