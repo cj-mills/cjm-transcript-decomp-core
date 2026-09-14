@@ -16,7 +16,49 @@ _PUNCT_RE = re.compile(r"[^\w\s]", re.UNICODE)
 # authoritative text — the v1-v3 token heuristic (closer/abbreviation/stub
 # lists) is RETIRED. The segmenter's identity (capability name + config hash)
 # joins the skeleton-identity composite beside this tag.
-SENTENCE_SPLIT_POLICY = "sentence-split/capability"
+# 'capability-v2' (finding efe88f17): the segmenter now reads EXTERNAL variants
+# through `normalize_external_text` — a pasted landing's wordwrap newlines
+# become spaces before the split, so pySBD (which splits at EVERY newline) no
+# longer cuts the skeleton mid-sentence; a paragraph break keeps ONE newline
+# and stays a boundary. Local transcriber text is untouched (it carries no
+# newlines). The split input changed for those variants, so the tag bumps.
+SENTENCE_SPLIT_POLICY = "sentence-split/capability-v2"
+
+# A newline run: its LAST newline is retained for a paragraph break; everything
+# else in the run becomes a space (length kept).
+_NEWLINE_RUN_RE = re.compile(r"[\r\n]+")
+_NEWLINE_INSIDE_RE = re.compile(r"[ \t]*[\r\n]+[ \t]*")
+
+
+def normalize_external_text(
+    text: str,  # An operator-landed external variant's text, verbatim as landed
+) -> str:  # The fold-input form: same length, wraps -> spaces, paragraph breaks -> one retained newline
+    """Offset-preserving fold-input normalisation for EXTERNAL variants (finding
+    efe88f17): the AI Studio 'Copy as text' gesture hard-wraps the transcript, and
+    pySBD splits at every newline — so a wrap mid-sentence became a sentence end
+    and a skeleton cut. Every newline run becomes spaces, except that a run
+    holding TWO OR MORE '\\n' (a paragraph / speaker break the model wrote on
+    purpose) keeps ONE '\\n' as its last character so the segmenter still sees
+    the boundary. '\\r' counts as whitespace of the run. The length never changes,
+    so every char-slice ref into the verbatim Transcript text stays valid; the
+    Transcript node itself is never rewritten — this is the fold's reading of it."""
+    def _run(m: "re.Match[str]") -> str:
+        run = m.group(0)
+        if run.count("\n") >= 2:
+            return " " * (len(run) - 1) + "\n"
+        return " " * len(run)
+    return _NEWLINE_RUN_RE.sub(_run, text)
+
+
+def collapse_newlines(
+    text: str,  # A segment's sliced text (may still hold a retained paragraph newline)
+) -> str:  # The same words, every newline run (with its flanking blanks) as one space
+    """The stored-text form of a slice that still holds a newline: a retained
+    paragraph break inside a segment (the split refused the cut, or no split ran)
+    is presentation, not content — it collapses to one space so the correction
+    app's <pre> walk lane never renders a ragged block. Slice refs are untouched
+    (they index the verbatim Transcript text, not this string)."""
+    return _NEWLINE_INSIDE_RE.sub(" ", text).strip()
 
 # Event-carve policy tag (respine trial DEC 6cc10fb7): versioned for the same
 # reason — it is a SKELETON IDENTITY input. 'v1' = cut-don't-label: model event
@@ -180,11 +222,14 @@ def build_segments_from_alignment(
     num_chunks: int,                # Total number of VAD chunks
     source_id: Optional[str] = None,           # Source row id for traceability
     source_provider_id: Optional[str] = None,  # Source provider identifier
+    collapse_newlines_in_text: bool = False,   # External variants (efe88f17): a newline still inside a slice -> one space in the stored text
 ) -> List[TextSegment]:  # One segment per VAD chunk
     """Build a TextSegment per VAD chunk by grouping words by chunk assignment.
 
     Each chunk's text is the original (punctuated) slice from the first to the
-    last word assigned to it; chunks with no words become empty segments.
+    last word assigned to it; chunks with no words become empty segments. With
+    `collapse_newlines_in_text` (external variants) the STORED text collapses any
+    newline run to one space — the slice refs stay the verbatim offsets.
     """
     chunk_spans: Dict[int, List[Tuple[int, int]]] = {}
     for span, chunk_idx in zip(spans, assignments):
@@ -197,6 +242,8 @@ def build_segments_from_alignment(
             seg_start = word_spans[0][0]
             seg_end = word_spans[-1][1]
             seg_text = text[seg_start:seg_end].strip()
+            if collapse_newlines_in_text:
+                seg_text = collapse_newlines(seg_text)
         else:
             seg_text = ""
             seg_start = None

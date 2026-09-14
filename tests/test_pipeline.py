@@ -309,3 +309,24 @@ def test_alignment_composition_external_landing_is_the_chunk_authority():
     by_name = {n.id: n for n in comp.nodes}
     assert by_name[metas[1]["seg_node"]].kwargs == {"text": "Beta, the real words."}
     assert by_name[metas[0]["seg_node"]].kwargs == {"text": "Alfa."}
+
+
+def test_alignment_composition_normalises_external_text_at_fold_input():
+    """Finding efe88f17: an external landing's wordwrap newlines are spaces (a paragraph
+    break keeps one newline) by the time FA and the segmenter read the text — same
+    length, so slice refs stay verbatim offsets; a local transcriber's text is untouched."""
+    from cjm_transcript_decomp_core.alignment import SENTENCE_SPLIT_POLICY
+    landed = "Beta, the real\nwords again.\n\nNew speaker\nhere."
+    segs = [{"start": 0.0, "end": 100.0, "model_input_path": "/s0.wav",
+             "transcripts": {"whisper": {"text": "Beta.\nkept"},
+                             "gemini-3.8-flash/manual": {"text": landed}}}]
+    comp, metas = build_alignment_composition(
+        segs, "silero", "qwen3", ["whisper", "gemini-3.8-flash/manual"],
+        seg_id="pysbd", seg_text_from="whisper")
+    by_name = {n.id: n for n in comp.nodes}
+    folded = metas[0]["texts"]["gemini-3.8-flash/manual"]
+    assert folded == "Beta, the real words again. \nNew speaker here." and len(folded) == len(landed)
+    assert by_name[metas[0]["seg_node"]].kwargs == {"text": folded}, "the segmenter reads the normalised form"
+    assert by_name[metas[0]["fa_nodes"]["gemini-3.8-flash/manual"]].kwargs["text"] == folded
+    assert metas[0]["texts"]["whisper"] == "Beta.\nkept", "local text is never rewritten"
+    assert SENTENCE_SPLIT_POLICY == "sentence-split/capability-v2", "the split input changed -> the tag bumped"

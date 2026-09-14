@@ -303,3 +303,41 @@ def test_assign_uncontained_word_prefers_overlap():
     assert assign_words_to_chunks([FAWord("hm", 11.0, 11.1)], chunks) == [1]
     # Contained start: unchanged half-open containment.
     assert assign_words_to_chunks([FAWord("hi", 0.5, 0.9)], chunks) == [0]
+
+
+# ---- finding efe88f17: external-variant newline normalisation at fold input ----
+
+def test_normalize_external_text_keeps_length_and_paragraph_breaks():
+    from cjm_transcript_decomp_core.alignment import normalize_external_text
+    raw = "And this leads to some surprising\nresults again.\n\nNext speaker here.\r\nwrapped\n \n\nend."
+    out = normalize_external_text(raw)
+    assert len(out) == len(raw), "offset-preserving: every char-slice ref stays valid"
+    assert out.startswith("And this leads to some surprising results again."), "a wordwrap newline is a space"
+    assert "\n\n" not in out and out.count("\n") == 2, "a paragraph break keeps exactly ONE newline"
+    assert out.split("\n")[0].endswith("results again. "), "the retained newline is the run's LAST char"
+    assert "\r" not in out, "a carriage return is whitespace of the run"
+    assert out.split() == raw.split(), "the words never change"
+
+
+def test_normalize_external_text_is_identity_without_newlines():
+    from cjm_transcript_decomp_core.alignment import normalize_external_text
+    assert normalize_external_text("Local text. No wraps here.") == "Local text. No wraps here."
+
+
+def test_collapse_newlines_in_stored_text_only():
+    from cjm_transcript_decomp_core.alignment import collapse_newlines
+    assert collapse_newlines("first part \nsecond part") == "first part second part"
+    assert collapse_newlines("a\r\n\tb\n\nc") == "a b c"
+    assert collapse_newlines("clean") == "clean"
+
+
+def test_build_segments_collapses_newlines_for_external_variants_only():
+    text = "Hello world.\nFoo\nbar."
+    spans = map_fa_words_to_text(text, FA)
+    assignments = [0, 0, 1, 1]
+    plain = build_segments_from_alignment(text, spans, assignments, 2)
+    ext = build_segments_from_alignment(text, spans, assignments, 2, collapse_newlines_in_text=True)
+    assert plain[1].text == "Foo\nbar." and ext[1].text == "Foo bar."
+    assert (ext[1].start_char, ext[1].end_char) == (plain[1].start_char, plain[1].end_char), \
+        "the slice refs are the verbatim offsets either way"
+    assert text[ext[1].start_char:ext[1].end_char] == "Foo\nbar."

@@ -22,7 +22,8 @@ from cjm_substrate.core.workspace import resolve_recorded_tree
 from cjm_transcript_decomp_core.alignment import (assign_words_to_chunks,
                                                   build_segments_from_alignment,
                                                   carve_chunks_at_event_spans, EVENT_SPLIT_POLICY,
-                                                  map_fa_words_to_text, rescue_gap_words,
+                                                  map_fa_words_to_text, normalize_external_text,
+                                                  rescue_gap_words,
                                                   sentence_end_word_indices, SENTENCE_SPLIT_POLICY,
                                                   split_chunks_at_sentence_gaps,
                                                   tier1_alignment_checks, WORD_RESCUE_POLICY)
@@ -143,6 +144,14 @@ def build_alignment_composition(
         transcripts = pseg.get("transcripts") or {}
         texts = {t: str((transcripts.get(t) or {}).get("text") or "")
                  for t in transcribers if t in transcripts}
+        # Fold-input normalisation, EXTERNAL variants only (finding efe88f17):
+        # a pasted landing's wordwrap newlines become spaces (a paragraph break
+        # keeps one newline) BEFORE forced alignment and sentence segmentation
+        # read the text — pySBD splits at every newline, so a wrap mid-sentence
+        # used to cut the skeleton. Same length, so the char-slice refs minted
+        # at commit still index the verbatim Transcript text.
+        texts = {t: (normalize_external_text(x) if is_external_transcriber(t) else x)
+                 for t, x in texts.items()}
         nonempty = {t: x for t, x in texts.items() if x.strip()}
         # Plausibility gate (finding 84f466bb): a runaway repetition loop is
         # text far denser than speech for the chunk's duration (the live case:
@@ -337,6 +346,9 @@ async def decompose_source(
                 text=m["texts"][t], spans=per_t_spans[t],
                 assignments=assign_words_to_chunks(per_t_words[t], vad_chunks),
                 num_chunks=len(vad_chunks), source_provider_id=t,
+                # efe88f17: a retained paragraph newline inside an external
+                # variant's slice is presentation — the stored text drops it.
+                collapse_newlines_in_text=is_external_transcriber(t),
             )
         auth = per_t_segments.get(t_auth)
         if auth is not None:
