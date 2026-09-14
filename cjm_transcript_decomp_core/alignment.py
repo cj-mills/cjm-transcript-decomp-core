@@ -60,6 +60,7 @@ def collapse_newlines(
     (they index the verbatim Transcript text, not this string)."""
     return _NEWLINE_INSIDE_RE.sub(" ", text).strip()
 
+
 # Event-carve policy tag (respine trial DEC 6cc10fb7): versioned for the same
 # reason — it is a SKELETON IDENTITY input. 'v1' = cut-don't-label: model event
 # spans (a ProposalSetManifest consumed by pointer) become GAPS between chunks;
