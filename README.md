@@ -26,7 +26,9 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `assign_words_to_chunks` _function_ — Assign each FA word to a VAD chunk by timestamp overlap.
 - `build_segments_from_alignment` _function_ — Build a TextSegment per VAD chunk by grouping words by chunk assignment.
 - `carve_chunks_at_event_spans` _function_ — The event-carve stage (EVENT_SPLIT_POLICY, respine trial DEC 6cc10fb7):
+- `collapse_newlines` _function_ — The stored-text form of a slice that still holds a newline: a retained
 - `map_fa_words_to_text` _function_ — Map forced-alignment words back to character spans in the original text.
+- `normalize_external_text` _function_ — Offset-preserving fold-input normalisation for EXTERNAL variants (finding
 - `rescue_gap_words` _function_ — The word-rescue stage (WORD_RESCUE_POLICY, 96edc646 verdict bc7ece7b):
 - `sentence_end_word_indices` _function_ — Map capability-delivered sentence boundaries onto FA words (B.5: the
 - `split_chunks_at_sentence_gaps` _function_ — The sentence-split stage (SENTENCE_SPLIT_POLICY, DEC f1024568): refine the
