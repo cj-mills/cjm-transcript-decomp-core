@@ -438,9 +438,14 @@ def render_chunk_prompt(
     ctx: Dict[str, Any],  # resolve_chunk_context output
     template: Optional[str] = None,  # Prompt template override (None = the transcription core's default)
 ) -> Dict[str, Any]:  # render_escalation_prompt's dict + "audio" (the chunk's model-input WAV) + "chunk"
-    """Mode one (--prompt): the chunk's escalation prompt WITH CONTEXT — no writes."""
+    """Mode one (--prompt): the chunk's escalation prompt WITH CONTEXT — no writes.
+    Slot text follows per-chunk authority (an escalated neighbour lends its landed
+    text), else the live run's text_from (the accuracy model), never the first
+    transcriber in manifest order (the lightweight one)."""
+    text_from = str((ctx["decomp_manifest"].get("config") or {}).get("text_from") or "") or None
     r = render_escalation_prompt(ctx["transcription_manifest"], ctx["source_index"],
-                                 int(ctx["chunk_entry"].get("index", -1)), template=template)
+                                 int(ctx["chunk_entry"].get("index", -1)), template=template,
+                                 transcriber=text_from)
     r["audio"] = str(ctx["chunk_entry"].get("model_input_path") or "")
     r["chunk"] = int(ctx["chunk_entry"].get("index", -1))
     r["chunk_range"] = (float(ctx["chunk_entry"].get("start", 0.0)), float(ctx["chunk_entry"].get("end", 0.0)))
