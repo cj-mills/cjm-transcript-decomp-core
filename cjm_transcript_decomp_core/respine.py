@@ -531,6 +531,43 @@ async def respine_chunk(
         "audio_segment": ctx["audio_segment"], "skeleton_hash": skeleton_hash,
         "parent_run_id": ctx["decomp_manifest"].get("run_id"), "graph_capability": graph_id})
     try:
+        # 0. PROVE the policy stack BEFORE any write (the 2026-09-16 field failure: a
+        # forced-aligner load that failed after the landing left a transcript + derived
+        # manifest behind with no respine). The live spine's OWN policy: its manifest's
+        # DecompConfig, its recorded capability configs, verified by config hash.
+        dm = ctx["decomp_manifest"]
+        cfg = decomp_config_from(dm.get("config") or {})
+        cfg.graph_capability = graph_id
+        parent_transcribers = list((tm.get("config") or {}).get("transcriber_capabilities") or [])
+        text_from = cfg.text_from or (parent_transcribers[0] if len(parent_transcribers) == 1 else None)
+        if not text_from or text_from not in parent_transcribers:
+            raise ValueError(f"the live run's text_from {cfg.text_from!r} is not among the manifest's "
+                             f"transcribers {parent_transcribers}")
+        recorded = dm.get("capabilities") or {}
+        stack = [cfg.vad_capability, cfg.fa_capability] + ([cfg.seg_capability] if cfg.sentence_split else [])
+        configs = {iid: dict((recorded.get(iid) or {}).get("config") or {}) for iid in stack}
+        for iid in stack:
+            configs[iid].pop("db_path", None)
+        load_order = ([sysmon_capability] if sysmon_capability else []) + stack
+        try:
+            load_capabilities(manager, load_order, configs={k: v for k, v in configs.items() if v} or None)
+        except SystemExit as e:
+            raise ValueError(f"the policy stack did not load ({e}) — nothing was written; the worker "
+                             f"diagnostics name the cause") from e
+        live_info = collect_capability_info(manager, stack)
+        for iid in stack:
+            want = str((recorded.get(iid) or {}).get("config_hash") or "")
+            got = str((live_info.get(iid) or {}).get("config_hash") or "")
+            if want and got and want != got:
+                for x in reversed(load_order):
+                    try:
+                        manager.unload_capability(x)
+                    except Exception:
+                        pass
+                raise ValueError(f"{iid} loaded with config hash {got[:19]}… but the live spine was cut "
+                                 f"under {want[:19]}… — a different policy would cut this chunk "
+                                 f"differently from its neighbours; refuse")
+
         # 1. LAND the paste — the transcription core's one landing (the app's `i` import).
         landing = {"producer": PRODUCER_EXTERNAL, "reason": reason, "parent_run_id": tm.get("run_id"),
                    "actor": actor, "landed_at": time.time(), "model_id": model_id,
@@ -551,6 +588,11 @@ async def respine_chunk(
             _journal_run_event(manager, SubstrateEventType.RUN_FINISHED.value, run_id, actor, {
                 "core": "cjm-transcript-decomp-core", "kind": "respine-chunk", "status": "noop",
                 "transcript": transcript_id})
+            for x in reversed(load_order):
+                try:
+                    manager.unload_capability(x)
+                except Exception:
+                    pass
             return readout
         derived = derive_manifest(tm, run_id=land_run, parent_path=ctx["transcription_manifest_path"],
                                   kind="add-transcript")
@@ -566,30 +608,8 @@ async def respine_chunk(
         d_caps = derived.get("capabilities") or {}
         transcribers = list((derived.get("config") or {}).get("transcriber_capabilities") or [])
 
-        # 2. RE-DERIVE the chunk under the live spine's OWN policy.
-        dm = ctx["decomp_manifest"]
-        cfg = decomp_config_from(dm.get("config") or {})
-        cfg.graph_capability = graph_id
-        text_from = cfg.text_from or (transcribers[0] if len(transcribers) == 1 else None)
-        if not text_from or text_from not in transcribers:
-            raise ValueError(f"the live run's text_from {cfg.text_from!r} is not among the derived manifest's "
-                             f"transcribers {transcribers}")
-        recorded = dm.get("capabilities") or {}
-        stack = [cfg.vad_capability, cfg.fa_capability] + ([cfg.seg_capability] if cfg.sentence_split else [])
-        configs = {iid: dict((recorded.get(iid) or {}).get("config") or {}) for iid in stack}
-        for iid in stack:
-            configs[iid].pop("db_path", None)
-        load_order = ([sysmon_capability] if sysmon_capability else []) + stack
-        load_capabilities(manager, load_order, configs={k: v for k, v in configs.items() if v} or None)
+        # 2. RE-DERIVE the chunk under the live spine's OWN policy (the stack proven in 0).
         try:
-            live_info = collect_capability_info(manager, stack)
-            for iid in stack:
-                want = str((recorded.get(iid) or {}).get("config_hash") or "")
-                got = str((live_info.get(iid) or {}).get("config_hash") or "")
-                if want and got and want != got:
-                    raise ValueError(f"{iid} loaded with config hash {got[:19]}… but the live spine was cut "
-                                     f"under {want[:19]}… — a different policy would cut this chunk "
-                                     f"differently from its neighbours; refuse")
             spans: Optional[List[Tuple[float, float]]] = None
             if cfg.event_split:
                 ptr = str(ctx["decomp_record"].get("event_propset") or dm.get("event_propset") or "")
