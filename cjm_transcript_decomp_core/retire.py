@@ -35,7 +35,8 @@ from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.graph import GraphNode
 from cjm_context_graph_primitives.journal import append_op
 from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate, RelationPredicate
-from cjm_transcript_graph_schema.schema import TranscriptGraphLabels
+from cjm_transcript_graph_schema.schema import (RESPINE_OP_VERB, SEGMENT_SUPERSEDED_BY_PROP,
+                                                TranscriptGraphLabels)
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +243,10 @@ async def list_spines(
     rends = rendition_ids if rendition_ids is not None else await source_rendition_ids(queue, graph_id, source_id)
     if not rends:
         return []
+    # The ONE reader predicate a chunk respine adds (0b4d5cfa (4)): a superseded
+    # segment left the live view, so it never counts toward a spine's size.
     q = NodeQuery(label=TranscriptGraphLabels.SEGMENT, project=["skeleton_hash", "split_policy", "created_at"],
+                  where=[PropertyPredicate(SEGMENT_SUPERSEDED_BY_PROP, "is_null")],
                   related=RelationPredicate(SpineRelations.PART_OF, node_ids=list(rends)))
     groups: Dict[Optional[str], Dict[str, Any]] = {}
     for r in _rows(await graph_task(queue, graph_id, "query_nodes", query=q.to_dict())):
@@ -360,13 +364,16 @@ def _dep_for(dep_map: Optional[Dict[Tuple[str, str], Dict[str, Any]]], source_id
 # ---- journaled writes + replay --------------------------------------------------------------
 
 async def apply_spine_fact(queue: Any, graph_id: str, op: Dict[str, Any]) -> None:
-    """Replay handler for spine-retire / spine-compaction: property merges on the Source."""
+    """Replay handler for spine-retire / spine-compaction / chunk-respine: property merges
+    on the Source (and, for a chunk respine, on its Segments — the superseded_by stamps
+    and the renumbered tail ride the same `updates` list)."""
     for u in op.get("updates") or []:
         await graph_task(queue, graph_id, "update_node", node_id=u["id"], properties=dict(u["properties"]))
 
 
 def spine_fact_handlers() -> Dict[str, Any]:  # verb -> handler, for decomp_replay_handlers
-    return {RETIRE_VERB: apply_spine_fact, COMPACTION_VERB: apply_spine_fact}
+    return {RETIRE_VERB: apply_spine_fact, COMPACTION_VERB: apply_spine_fact,
+            RESPINE_OP_VERB: apply_spine_fact}
 
 
 async def journal_spine_retire(

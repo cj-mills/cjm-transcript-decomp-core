@@ -116,6 +116,7 @@ def build_alignment_composition(
     seg_id: Optional[str] = None,        # Sentence-segmentation capability instance id (B.5; None = no split stage)
     seg_text_from: Optional[str] = None,  # Authoritative transcriber whose text the segmenter reads
     max_words_per_second: Optional[float] = None,  # Plausibility gate (84f466bb): drop a transcriber's text denser than this for the chunk; None/0 = no gate
+    pseg_indices: Optional[Any] = None,  # Restrict to these pipeline-segment positions (a chunk respine, 0b4d5cfa (2)); None = every pseg. Meta rows keep the ORIGINAL pseg_index
 ) -> Tuple[Composition, List[Dict[str, Any]]]:  # (composition, per-pseg meta rows)
     """Build the whole-source M×(VAD ∥ T×FA ∥ SEG) composition (D8 fan-in, stage-5 variants).
 
@@ -137,7 +138,10 @@ def build_alignment_composition(
     """
     nodes: List[CompositionNode] = []
     metas: List[Dict[str, Any]] = []
+    wanted = None if pseg_indices is None else {int(i) for i in pseg_indices}
     for i, pseg in enumerate(seg_list):
+        if wanted is not None and i not in wanted:
+            continue  # a chunk-scoped run (0b4d5cfa): only the selected pseg(s) contribute nodes
         # Manifest entries are JSON dicts (manifest-as-interchange, CR-20).
         model_input = str(pseg.get("model_input_path", ""))
         seg_start = float(pseg.get("start", 0.0))
@@ -233,6 +237,7 @@ async def decompose_source(
     text_from: str,            # Authoritative transcriber (layer-0 text)
     event_spans: Optional[List[Tuple[float, float]]] = None,  # Model event spans (SOURCE seconds) to carve out (respine trial DEC 6cc10fb7); None = no event stage
     gated_sink: Optional[List[Dict[str, Any]]] = None,  # Collects every plausibility-gated transcriber text (84f466bb) for the run's journal row; None = log only
+    pseg_indices: Optional[Any] = None,  # Restrict the run to these pipeline-segment positions (a chunk respine, 0b4d5cfa (2)); None = the whole source. Indices in the result start at 0 — the caller rebases
 ) -> Tuple[str, List[DecompSegment]]:  # (source_path, ordered aligned segments)
     """Decompose one source into aligned fine segments with per-transcriber variants.
 
@@ -242,6 +247,10 @@ async def decompose_source(
     the authoritative text, every transcriber's chunk text + char range rides
     `variants` (slice refs at commit). C4's "same skeleton, different text"
     duplication is gone — agreement is stored once by construction.
+
+    `pseg_indices` is the chunk-respine seam (0b4d5cfa (2)): the SAME stages
+    under the SAME config run over one coarse chunk only, so the re-derived
+    segments are cut by exactly the policy that cut their neighbours.
     """
     source_path = str(source.get("source_path", ""))
     seg_list = list(source.get("segments") or [])
@@ -250,7 +259,8 @@ async def decompose_source(
         seg_list, cfg.vad_capability, cfg.fa_capability, transcribers, force=cfg.force,
         seg_id=(cfg.seg_capability if cfg.sentence_split else None),
         seg_text_from=text_from,
-        max_words_per_second=(cfg.max_words_per_second or None))
+        max_words_per_second=(cfg.max_words_per_second or None),
+        pseg_indices=pseg_indices)
     for m in metas:
         for t, why in (m.get("implausible") or {}).items():
             logger.warning(
@@ -724,9 +734,10 @@ def decomp_replay_handlers() -> Dict[str, Any]:  # verb -> async handler(queue, 
     unioned by `composed_replay_handlers`. The two extension verbs are `journal_extend`
     ops — wire-carrying by construction — so they register the layer's shared
     `apply_wires` (identity-comparable across cores: transcription also emits
-    `derivation`, and the shared handler keeps that collision legal). The two spine
-    FACT verbs (spine-retire / spine-compaction, ruling a7617bd4) are property merges
-    on the Source and replay through `apply_spine_fact`."""
+    `derivation`, and the shared handler keeps that collision legal). The three spine
+    FACT verbs (spine-retire / spine-compaction, ruling a7617bd4; chunk-respine,
+    ruling 0b4d5cfa (4)) are property merges on Segments + the Source and replay
+    through `apply_spine_fact`."""
     from cjm_transcript_decomp_core.retire import spine_fact_handlers
     return {**wires_handlers("spine-extension", "derivation"), **spine_fact_handlers()}
 

@@ -206,6 +206,46 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                     help="After compacting, rebuild the compacted journal into TMP_DB (fresh path) "
                          "and compare id-set digests with the live db (P-49); slow at scale")
     _spine_plumbing(cs)
+
+    # ---- respine-chunk: chunk escalation WITH decomposition (work item 7a5e9c84, ruling 0b4d5cfa) ----
+    rc = sub.add_parser(
+        "respine-chunk",
+        help="Re-derive ONE coarse chunk of a LIVE spine from an escalated external transcript. "
+             "--prompt renders the chunk's escalation prompt (+ hash + audio path), no writes; "
+             "--text-file lands the paste as <model id>/manual, saves the derived transcription "
+             "manifest, re-derives THAT chunk under the live spine's own decomp policy and replaces "
+             "its segments IN the live spine (salted ids, tail renumbered, old segments stamped "
+             "superseded_by). Dependents: accepted event inserts + speaker assignments carry by "
+             "time; the rest strand only with --strand")
+    rc.add_argument("--source", required=True, help="Source id, id prefix, or title substring")
+    rc.add_argument("--chunk", type=int, default=None, metavar="N",
+                    help="The coarse chunk's manifest index (= the AudioSegment index)")
+    rc.add_argument("--at-time", type=float, default=None, metavar="SECONDS",
+                    help="A source-coordinate time inside the chunk (the correction cursor) — instead of --chunk")
+    rc.add_argument("--skeleton", default=None,
+                    help="Which LIVE spine (a skeleton-hash prefix; default: the source's default live spine)")
+    rc.add_argument("--prompt", action="store_true",
+                    help="Mode one: print the escalation prompt with context, its template hash and the "
+                         "chunk's audio path; touch nothing")
+    rc.add_argument("--prompt-file", default=None,
+                    help="Prompt TEMPLATE file (hashed into the variant's config hash; default: the built-in template)")
+    rc.add_argument("--text-file", default=None,
+                    help="Mode two: the pasted transcript ('-' = stdin) to land and respine the chunk from")
+    rc.add_argument("--model-id", default=None,
+                    help="The external model id the paste files under (default: the shared escalation default)")
+    rc.add_argument("--prompt-hash", default=None,
+                    help="A precomputed prompt-template hash (the one --prompt printed) instead of --prompt-file")
+    rc.add_argument("--text-source", default="paste", help="Provenance of the text (e.g. 'gemini web ui')")
+    rc.add_argument("--reason", default="escalation", help="Why (journaled)")
+    rc.add_argument("--strand", action="store_true",
+                    help="Strand the chunk's NON-transferable dependents (marks, reviews, nudges, text edits, "
+                         "splits, word-bearing inserts) — the explicit say-so 0b4d5cfa (5) requires")
+    rc.add_argument("--runs-dir", default=None,
+                    help="Both cores' run-manifest directory (default: the workspace's runs/, else runs/)")
+    rc.add_argument("--sysmon-capability", default=None, help="monitor capability for GPU attribution (loaded first)")
+    rc.add_argument("--dry-run", action="store_true",
+                    help="Resolve the chunk, list its dependents and the plan; write nothing")
+    _spine_plumbing(rc)
     return parser
 
 
@@ -380,7 +420,112 @@ def main(
         return asyncio.run(backfill_provenance_command(args))
     if args.command in ("list-spines", "retire-spine", "retire-superseded", "compact-spines"):
         return asyncio.run(spine_command(args))
+    if args.command == "respine-chunk":
+        return asyncio.run(respine_chunk_command(args))
     raise SystemExit(f"unknown command: {args.command}")
+
+
+async def respine_chunk_command(
+    args: argparse.Namespace,  # Parsed arguments for `respine-chunk`
+) -> int:  # Process exit code (0 = done / prompt printed; 2 = refused)
+    """Execute `respine-chunk` (work item 7a5e9c84, ruling 0b4d5cfa; the machinery lives
+    in `respine.py`). One graph stack for the whole act; --prompt never writes; the
+    landing + extension + transfer + fact all journal through the sidecar; refusals
+    (dependents without --strand, a missing manifest lineage, a policy mismatch) print
+    and exit 2 — nothing partial lands before the first write."""
+    from cjm_transcript_decomp_core import respine as RS
+    from cjm_transcription_core.chunk import DEFAULT_ESCALATION_MODEL_ID, prompt_hash_of
+
+    ws = resolve_workspace(explicit=getattr(args, "workspace", None))
+    if ws is not None:
+        os.environ["CJM_WORKSPACE"] = str(ws.root)
+    runs_dir = (Path(args.runs_dir) if args.runs_dir
+                else (ws.runs_dir if ws is not None else Path("runs")))
+    if bool(args.prompt) == bool(args.text_file):
+        raise SystemExit("respine-chunk: give --prompt (render, no writes) OR --text-file (land + respine)")
+    if args.prompt_file and args.prompt_hash:
+        raise SystemExit("give --prompt-file OR --prompt-hash, not both")
+    template = Path(args.prompt_file).read_text() if args.prompt_file else None
+    manager = CapabilityManager(search_paths=[Path(args.manifests_dir)],
+                                sysmon_capability_name=args.sysmon_capability)
+    configs = ({args.graph_capability: {"db_path": args.graph_db_path}}
+               if args.graph_db_path else None)
+    load_capabilities(manager, [args.graph_capability], configs=configs)
+    effective = args.graph_db_path or (
+        (manager.instances[args.graph_capability].config or {}).get("db_path"))
+    if not effective:
+        raise SystemExit("no graph db path: pass --graph-db-path, or persist one on the "
+                         f"{args.graph_capability} instance in the active workspace's config store")
+    journal_path = sidecar_journal_path(str(effective))
+    actor = args.actor or f"human:{getpass.getuser()}"
+    gid = args.graph_capability
+    queue = JobQueue(deps=manager, sysmon_capability_name=args.sysmon_capability)
+    await queue.start()
+    try:
+        from cjm_transcript_decomp_core import retire as R
+        try:
+            sid, title = await R.resolve_source_id(queue, gid, args.source)
+            ctx = await RS.resolve_chunk_context(queue, gid, source_id=sid, skeleton_selector=args.skeleton,
+                                                 runs_dir=runs_dir, chunk=args.chunk, at_time=args.at_time)
+        except ValueError as e:
+            print(f"REFUSED: {e}")
+            return 2
+        if args.prompt:
+            r = RS.render_chunk_prompt(ctx, template=template)
+            print(f"source: {sid}  {title}")
+            print(f"chunk: {r['chunk']}  {r['chunk_range'][0]:.1f}-{r['chunk_range'][1]:.1f}s  "
+                  f"live segments: {r['live_segments']}  spine: {R.spine_label(ctx['spine'])}")
+            print(f"prompt_hash: {r['prompt_hash']}")
+            print(f"audio: {r['audio']}")
+            print("----")
+            print(r["prompt"])
+            return 0
+        if args.text_file == "-":
+            import sys
+            text = sys.stdin.read()
+        else:
+            text = Path(args.text_file).read_text()
+        prompt_hash = args.prompt_hash or (prompt_hash_of(template) if template is not None
+                                           else RS.render_chunk_prompt(ctx)["prompt_hash"])
+        try:
+            r = await RS.respine_chunk(
+                manager, queue, load_capabilities, graph_id=gid, journal_path=journal_path, ctx=ctx,
+                text=text, model_id=(args.model_id or DEFAULT_ESCALATION_MODEL_ID), prompt_hash=prompt_hash,
+                text_source=args.text_source, reason=args.reason, actor=actor, runs_dir=runs_dir,
+                workspace=ws, strand=args.strand, dry_run=args.dry_run,
+                sysmon_capability=args.sysmon_capability)
+        except ValueError as e:
+            print(f"REFUSED: {e}")
+            return 2
+        if r.get("wordwrap_warning"):
+            print(r["wordwrap_warning"])
+        if r.get("dry_run"):
+            print(f"dry run: chunk {r['chunk']} ({r['old_segments']} live segment(s)) would land as "
+                  f"{r['transcriber']} (config {r['config_hash'][:19]}…) and respine; dependents: {r['plan']}")
+            return 0
+        if r.get("noop"):
+            print(f"chunk {r['chunk']}: {r['status']} (transcript {r['transcript']})")
+            return 0
+        d = r["dependents"]
+        print(f"respined chunk {r['chunk']} of {title}: {r['old_segments']} old segment(s) -> "
+              f"{r['new_segments']} new (indices {r['first_index']}..{r['first_index'] + r['new_segments'] - 1}), "
+              f"tail renumbered by {r['delta']:+d} ({r['renumbered']} segment(s)); "
+              f"carried {r['carried']} correction(s) ({d['events']} event insert(s) + {d['speakers']} speaker "
+              f"assignment(s)), {r['straddles']} straddle(s) left unassigned; stranded {r['stranded']}"
+              + (f"; {d['reviews']} review marker(s) left behind" if d.get("reviews") else "")
+              + f"; verify {'OK' if r.get('verify_ok') else 'FAILED' if r.get('verify_ok') is False else 'n/a'}")
+        print(f"transcript: {r['transcript']}" + (f" supersedes {r['supersedes']}" if r.get("supersedes") else "")
+              + f"  op: {r['op_id']}")
+        print(f"derived manifest: {r['derived_manifest']}")
+        print(f"decomp manifest: {r['decomp_manifest']}")
+        print(f"journal: {journal_path}")
+        return 0
+    finally:
+        try:
+            await queue.stop()
+        except Exception:
+            pass
+        manager.unload_capability(gid)
 
 
 async def backfill_provenance_command(

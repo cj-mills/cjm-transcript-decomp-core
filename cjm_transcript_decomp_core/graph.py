@@ -75,6 +75,7 @@ def build_extension_payload(
     text_from: str,                           # Authoritative transcriber (layer-0 text designation)
     segments: List[DecompSegment],            # Ordered aligned segments (per-transcriber variants attached)
     split_policy: Optional[str] = None,       # Split policy+version that refined the skeleton (node metadata, never identity)
+    identity_salt: Optional[str] = None,      # Chunk-respine salt (0b4d5cfa (3)): the landed Transcript id joins every Segment id, the skeleton hash prop stays; None = a normal run
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], Dict[str, Any]]:  # (nodes, edges, ids)
     """Build the fine-spine EXTENSION payload (pure; no capability calls).
 
@@ -115,6 +116,7 @@ def build_extension_payload(
             text_from=(a["transcripts"].get(getattr(seg, "text_from", None) or text_from)
                        if seg.text.strip() else None),  # per-chunk authority (an external landing) wins
             split_policy=split_policy, text_slices=slices,
+            identity_salt=identity_salt,
         )
         nodes.append(node.to_graph_node())
         seg_ids.append(node.id)

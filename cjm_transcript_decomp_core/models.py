@@ -173,9 +173,11 @@ class DecompManifest:
     word_rescue_policy: Optional[str] = None  # Word-rescue policy+version when the rescue stage ran (0.2.5; None = no rescue)
     event_propset_id: str = ""          # Consumed ProposalSetManifest id (0.2.4; the propset -> skeleton chain join key)
     event_propset: str = ""             # Recorded path of the consumed ProposalSetManifest (0.2.4; the pointer)
+    parent_run_id: str = ""             # 0.2.7: the decomp run whose LIVE spine a chunk respine re-derived into ("" = a whole-source run)
+    respined_chunk: Dict[str, Any] = field(default_factory=dict)  # 0.2.7: the RespinedChunkEntry dict a chunk respine landed ({} = a whole-source run)
 
     FORMAT: str = field(default="cjm-transcript-decomp-core/run-manifest", repr=False)  # Format tag
-    VERSION: str = field(default="0.2.6", repr=False)                                   # Schema version (0.2.6: per-source skeleton hash + consumed propset on each source record — multi-source event carve; the run-level fields hold the value only when every source shares it; 0.2.5: word-rescue policy recorded; 0.2.4: event-carve respine — propset pointer + id + event policy recorded; 0.2.3: capability-driven sentence split)
+    VERSION: str = field(default="0.2.7", repr=False)                                   # Schema version (0.2.7: chunk respine — parent_run_id + respined_chunk on a chunk-scoped run, 0b4d5cfa; 0.2.6: per-source skeleton hash + consumed propset on each source record — multi-source event carve; the run-level fields hold the value only when every source shares it; 0.2.5: word-rescue policy recorded; 0.2.4: event-carve respine — propset pointer + id + event policy recorded; 0.2.3: capability-driven sentence split)
 
     def to_dict(self) -> Dict[str, Any]:  # Plain-dict form for JSON serialization
         """Serialize to a plain dict with nested sources."""
@@ -195,6 +197,8 @@ class DecompManifest:
             "word_rescue_policy": self.word_rescue_policy,
             "event_propset_id": self.event_propset_id,
             "event_propset": self.event_propset,
+            "parent_run_id": self.parent_run_id,
+            "respined_chunk": dict(self.respined_chunk),
             "sources": [s.to_dict() for s in self.sources],
         }
 
