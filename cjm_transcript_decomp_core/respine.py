@@ -50,17 +50,9 @@ from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.journal import journal_extend
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.journal import append_op
-from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate, RelationPredicate
+from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPredicate,
+                                                RelationPredicate)
 from cjm_substrate.core.journal_store import SubstrateEventType
-from cjm_transcript_graph_schema.schema import (external_config_hash, external_transcriber_name,
-                                                RESPINE_OP_VERB, RespinedChunkEntry,
-                                                SEGMENT_SUPERSEDED_BY_PROP, source_node_id,
-                                                SOURCE_RESPINED_CHUNKS_PROP, TranscriptGraphLabels)
-from cjm_transcription_core.chunk import (apply_chunk_update, derive_manifest, land_chunk_transcript,
-                                          load_run_manifest, prior_config_hash, PRODUCER_EXTERNAL,
-                                          render_escalation_prompt, save_manifest, text_shape,
-                                          wordwrap_warning)
-from cjm_transcription_core.models import new_run_id as new_landing_run_id
 from cjm_transcript_decomp_core.graph import (build_extension_payload, resolve_root_ids,
                                               verify_source)
 from cjm_transcript_decomp_core.models import (DecompConfig, DecompManifest, DecompSourceRecord,
@@ -71,6 +63,16 @@ from cjm_transcript_decomp_core.retire import (_rows, apply_spine_fact, default_
                                                get_source, list_spines, resolve_spine,
                                                source_rendition_ids, spine_label)
 from cjm_transcript_decomp_core.runs import DecompIndex
+from cjm_transcript_graph_schema.schema import (external_config_hash, external_transcriber_name,
+                                                RESPINE_OP_VERB, RespinedChunkEntry,
+                                                SEGMENT_SUPERSEDED_BY_PROP, source_node_id,
+                                                SOURCE_RESPINED_CHUNKS_PROP, TranscriptGraphLabels)
+from cjm_transcription_core.chunk import (apply_chunk_update, derive_manifest,
+                                          land_chunk_transcript, load_run_manifest,
+                                          prior_config_hash, PRODUCER_EXTERNAL,
+                                          render_escalation_prompt, save_manifest, text_shape,
+                                          wordwrap_warning)
+from cjm_transcription_core.models import new_run_id as new_landing_run_id
 
 logger = logging.getLogger(__name__)
 
