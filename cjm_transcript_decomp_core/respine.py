@@ -437,15 +437,18 @@ async def resolve_chunk_context(
 def render_chunk_prompt(
     ctx: Dict[str, Any],  # resolve_chunk_context output
     template: Optional[str] = None,  # Prompt template override (None = the transcription core's default)
+    slot_text: Optional[Callable[[float, float], Optional[str]]] = None,  # LIVE slot-text provider (chunk start, end) -> the corrected spine's text over that span (finding c63cd2e3); None = manifest text
 ) -> Dict[str, Any]:  # render_escalation_prompt's dict + "audio" (the chunk's model-input WAV) + "chunk"
     """Mode one (--prompt): the chunk's escalation prompt WITH CONTEXT — no writes.
     Slot text follows per-chunk authority (an escalated neighbour lends its landed
     text), else the live run's text_from (the accuracy model), never the first
-    transcriber in manifest order (the lightweight one)."""
+    transcriber in manifest order (the lightweight one). A caller holding the
+    corrected spine passes `slot_text` and the slots read THAT (manual fidelity
+    edits included); the CLI has no live spine and keeps the manifest source."""
     text_from = str((ctx["decomp_manifest"].get("config") or {}).get("text_from") or "") or None
     r = render_escalation_prompt(ctx["transcription_manifest"], ctx["source_index"],
                                  int(ctx["chunk_entry"].get("index", -1)), template=template,
-                                 transcriber=text_from)
+                                 transcriber=text_from, slot_text=slot_text)
     r["audio"] = str(ctx["chunk_entry"].get("model_input_path") or "")
     r["chunk"] = int(ctx["chunk_entry"].get("index", -1))
     r["chunk_range"] = (float(ctx["chunk_entry"].get("start", 0.0)), float(ctx["chunk_entry"].get("end", 0.0)))
