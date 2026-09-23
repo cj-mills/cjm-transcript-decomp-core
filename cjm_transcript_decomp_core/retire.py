@@ -29,12 +29,13 @@ import logging
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from cjm_context_graph_layer.compact import CompactReport, compact_journal, scan_references
+from cjm_context_graph_layer.compact import compact_journal, CompactReport, scan_references
 from cjm_context_graph_layer.grammar import OverlayRelations, SpineRelations
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.graph import GraphNode
 from cjm_context_graph_primitives.journal import append_op
-from cjm_context_graph_primitives.query import EdgeQuery, NodeQuery, PropertyPredicate, RelationPredicate
+from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPredicate,
+                                                RelationPredicate)
 from cjm_transcript_graph_schema.schema import (RESPINE_OP_VERB, SEGMENT_SUPERSEDED_BY_PROP,
                                                 TranscriptGraphLabels)
 
