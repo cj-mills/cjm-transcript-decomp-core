@@ -14,6 +14,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - **`cjm_transcript_decomp_core.launch`** — The shared launch surface every decomp shell drives through: the argument
 - **`cjm_transcript_decomp_core.models`** — Lean data shapes for the transcript-decomposition pipeline: in-core mirrors of the forced-alignment / VAD / text DTOs (no FastHTML deps), run configuration, the committed graph-segment carrier, and the decomposition run manifest (proto-bundle).
 - **`cjm_transcript_decomp_core.pipeline`** — The headless decomposition pipeline (stage 5: decomp is an EXTENDER). Load a transcription run manifest, verify the transcription-emitted graph root exists (the graph begins at transcription), then per source per pipeline-segment run VAD + per-transcriber forced alignment, build one aligned segment per VAD chunk with per-transcriber text variants, and attach the fine spine under the existing AudioSegment nodes via the layer's idempotent extend_graph — with HITL approval seams between alignment, commit, and the next source.
+- **`cjm_transcript_decomp_core.respine`** — Chunk RESPINE — re-derive ONE coarse chunk of a LIVE spine from a landed external transcript (work item 7a5e9c84; design ruling 0b4d5cfa, amendment 4a7ec4f8).
 - **`cjm_transcript_decomp_core.retire`** — Spine RETIREMENT + COMPACTION — safe removal of superseded decomposition spines (ruling a7617bd4, item eaefebd2).
 - **`cjm_transcript_decomp_core.runs`** — Run-manifest indexes for the decomp-batch TUI (work item 0ff6bf0f): the
 - **`cjm_transcript_decomp_core.segments`** — Fine-segment inspection for the decomp TUI (work item 166dd2b8, half a):
@@ -40,6 +41,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `build_parser` _function_ — Build the CLI parser (subcommands: run).
 - `load_capabilities` _function_ — Discover manifests + load each requested capability (default instance).
 - `main` _function_ — CLI entry point (console script: `cjm-transcript-decomp-core`).
+- `respine_chunk_command` _function_ — Execute `respine-chunk` (work item 7a5e9c84, ruling 0b4d5cfa; the machinery lives
 - `run_command` _function_ — Execute the `run` subcommand: extend transcription-run manifest(s) with the fine spine.
 - `spine_command` _function_ — The spine retirement + compaction verbs (ruling a7617bd4; the machinery lives in
 
@@ -95,10 +97,30 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `submit_and_wait` _function_ — Submit one capability job, wait for it, and return its result (raise on failure).
 - `vad_chunks_from_result` _function_ — Normalize a typed VAD result into segment-local VAD chunks.
 
+### `cjm_transcript_decomp_core.respine`
+
+- `bridge_edges` _function_ — Bridge NEXT from the previous live segment to the new first and from the new
+- `build_respine_op` _function_ — ONE replayed property-update op (pure): superseded_by on the old segments, the
+- `chunk_entry_for` _function_ — Resolve ONE coarse chunk of a source entry (pure): by manifest index, or by
+- `classify_dependents` _function_ — Sort the chunk's dependents into the two transferable classes and the rest
+- `decomp_config_from` _function_ — Rebuild the live spine's DecompConfig from its manifest snapshot (pure): the
+- `describe_dependents` _function_ — The refusal / readout listing (pure).
+- `find_decomp_manifest` _function_ — The decomp run that minted the live spine (pure): the newest manifest whose
+- `live_chunk_segments` _function_ — The chunk's LIVE segments: PART_OF its rendition, on the spine, not superseded.
+- `live_spine_index` _function_ — The whole live spine's (id, index) — the renumber plan's input.
+- `plan_renumber` _function_ — The renumber plan (pure; 0b4d5cfa (4), the 'do it properly' ruling): the new
+- `read_dependents` _function_ — What points at the old segments: every Correction with a CORRECTS edge into
+- `render_chunk_prompt` _function_ — Mode one (--prompt): the chunk's escalation prompt WITH CONTEXT — no writes.
+- `resolve_chunk_context` _function_ — Resolve the live spine -> its decomp manifest -> the transcription manifest it
+- `respine_chunk` _function_ — Mode two (--text-file): land -> re-derive the chunk under the live policy ->
+- `respine_op_id` _function_ — The op id `superseded_by` names: a function of (source, landed transcript).
+- `source_entry_for` _function_ — The transcription manifest's entry for a Source, by recomputed identity (pure).
+- `transfer_handler` _function_ — Discover the correction core's chunk-scoped transfer through the entry-point
+
 ### `cjm_transcript_decomp_core.retire`
 
 - `annotate_spines` _function_ — Mark each spine row with its retirement state (pure; rows copied).
-- `apply_spine_fact` _function_ — Replay handler for spine-retire / spine-compaction: property merges on the Source.
+- `apply_spine_fact` _function_ — Replay handler for spine-retire / spine-compaction / chunk-respine: property merges
 - `compact_retired` _function_ — The compact act over every retired, not-yet-compacted spine of the given sources:
 - `default_live_spine` _function_ — Which spine opens by default (pure). Preference is a DECLARED fact, never creation order:
 - `dependents_free` _function_
@@ -154,5 +176,5 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 
 ## Dependencies
 
-**Depends on:** `cjm-capability-primitives`, `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-substrate`, `cjm-transcript-graph-schema`, `pyyaml`
-**Used by:** `cjm-transcript-decomp-qt`
+**Depends on:** `cjm-capability-primitives`, `cjm-context-graph-layer`, `cjm-context-graph-primitives`, `cjm-substrate`, `cjm-transcript-graph-schema`, `cjm-transcription-core`, `pyyaml`
+**Used by:** `cjm-transcript-correction-qt`, `cjm-transcript-decomp-qt`
