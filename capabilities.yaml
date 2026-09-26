@@ -1,0 +1,46 @@
+# PUBLIC capabilities yaml — PROJECTED from capabilities_test.yaml by `cjm-ctl derive-public-capabilities` (ruling 8299fb9d: one channel, PyPI specs with
+# floors, env_file = the capability repo's raw environment.yml). Regenerate after every
+# publish window; the dev yaml with checkout paths stays the --capabilities override.
+capabilities:
+- name: sys-mon-nvidia
+  env_name: test-sys-mon
+  env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-monitor-nvidia/main/environment.yml
+  package: cjm-capability-monitor-nvidia>=0.0.25
+  interface_libs:
+  - cjm-capability-primitives>=0.0.12
+- name: silero-vad
+  env_name: test-silero-vad
+  env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-silero-vad/main/environment.yml
+  package: cjm-capability-silero-vad>=0.0.28
+  interface_libs:
+  - cjm-capability-primitives>=0.0.12
+  adapters:
+  - lib: cjm-vad-adapter-interface>=0.0.10
+    impl: cjm_vad_adapter_interface.generic:GenericVADAdapter
+- name: pysbd
+  env_name: test-pysbd
+  env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-pysbd/main/environment.yml
+  package: cjm-capability-pysbd>=0.0.1
+  interface_libs:
+  - cjm-capability-primitives>=0.0.12
+  adapters:
+  - lib: cjm-sentence-segmentation-adapter-interface>=0.0.1
+    impl: cjm_sentence_segmentation_adapter_interface.generic:GenericSentenceSegmentationAdapter
+- name: qwen3-forced-aligner
+  env_name: test-qwen3-fa
+  env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-qwen3-forced-aligner/main/environment.yml
+  package: cjm-capability-qwen3-forced-aligner>=0.0.27
+  interface_libs:
+  - cjm-capability-primitives>=0.0.12
+  adapters:
+  - lib: cjm-forced-alignment-adapter-interface>=0.0.15
+    impl: cjm_forced_alignment_adapter_interface.generic:GenericForcedAlignmentAdapter
+- name: sqlite-graph
+  env_name: test-sqlite-graph
+  env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-graph-sqlite/main/environment.yml
+  package: cjm-capability-graph-sqlite>=0.0.28
+  interface_libs:
+  - cjm-context-graph-primitives>=0.0.15
+  adapters:
+  - lib: cjm-graph-storage-adapter-interface>=0.0.8
+    impl: cjm_graph_storage_adapter_interface.generic:GenericGraphStorageAdapter
