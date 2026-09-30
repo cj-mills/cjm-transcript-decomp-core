@@ -49,7 +49,7 @@ from cjm_context_graph_layer.grammar import make_edge, SpineRelations
 from cjm_context_graph_layer.identity import derive_node_id
 from cjm_context_graph_layer.journal import journal_extend
 from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.journal import append_op
+from cjm_context_graph_primitives.journal import append_op, op_clocked
 from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPredicate,
                                                 RelationPredicate)
 from cjm_substrate.core.journal_store import SubstrateEventType
@@ -458,6 +458,7 @@ def render_chunk_prompt(
     return r
 
 
+@op_clocked
 async def respine_chunk(
     manager: Any,              # CapabilityManager holding the graph capability (the verb loads VAD/FA/SEG itself)
     queue: Any,                # Started job queue

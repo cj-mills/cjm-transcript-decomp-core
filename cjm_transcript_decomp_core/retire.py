@@ -33,7 +33,7 @@ from cjm_context_graph_layer.compact import compact_journal, CompactReport, scan
 from cjm_context_graph_layer.grammar import OverlayRelations, SpineRelations
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.graph import GraphNode
-from cjm_context_graph_primitives.journal import append_op
+from cjm_context_graph_primitives.journal import append_op, op_clocked
 from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPredicate,
                                                 RelationPredicate)
 from cjm_transcript_graph_schema.schema import (RESPINE_OP_VERB, SEGMENT_SUPERSEDED_BY_PROP,
@@ -377,6 +377,7 @@ def spine_fact_handlers() -> Dict[str, Any]:  # verb -> handler, for decomp_repl
             RESPINE_OP_VERB: apply_spine_fact}
 
 
+@op_clocked
 async def journal_spine_retire(
     queue: Any, graph_id: str,
     source_id: str,                        # The Source whose map changes
@@ -468,6 +469,7 @@ async def plan_superseded(
     return out
 
 
+@op_clocked
 async def compact_retired(
     queue: Any, graph_id: str,
     source_ids: Iterable[str],   # Sources to sweep for retired-but-uncompacted spines
