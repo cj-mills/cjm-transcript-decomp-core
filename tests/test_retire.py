@@ -7,7 +7,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from cjm_transcript_decomp_core import retire as R
 from cjm_transcript_decomp_core.pipeline import decomp_replay_handlers
 

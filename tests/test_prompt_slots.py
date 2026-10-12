@@ -1,6 +1,7 @@
 """render_chunk_prompt passes a LIVE slot-text provider through to the transcription
 core's renderer (finding c63cd2e3): the correction app's corrected spine fills the
 slots; the CLI path (no provider) keeps the manifest source."""
+
 from cjm_transcript_decomp_core.respine import render_chunk_prompt
 
 

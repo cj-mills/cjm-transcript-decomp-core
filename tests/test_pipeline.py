@@ -2,18 +2,13 @@
 
 Projected from the pipeline notebook's import-smoke and composition-builder cells at
 the golden-reference flip."""
+
 from cjm_capability_primitives.forced_alignment import ForcedAlignItem, ForcedAlignResult
 from cjm_capability_primitives.vad import TimeRange, VADResult
 from cjm_substrate.core.ports import new_composition_run
-
-from cjm_transcript_decomp_core.pipeline import (
-    build_alignment_composition,
-    decompose_source,
-    fa_words_from_result,
-    load_source_manifest,
-    run_decomp,
-    vad_chunks_from_result,
-)
+from cjm_transcript_decomp_core.pipeline import (build_alignment_composition, decompose_source,
+                                                 fa_words_from_result, load_source_manifest,
+                                                 run_decomp, vad_chunks_from_result)
 
 SEGS = [
     {"model_input_path": "/s0.wav", "start": 0.0,

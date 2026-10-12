@@ -4,12 +4,12 @@ headline case, not an edge case), display interleave, timestamp formatting,
 and the recorded-VAD-config summary."""
 
 import json
+
 from cjm_transcript_decomp_core.segments import (aseg_index_for, build_display,
-                                                capability_config_schema,
-                                                find_gaps, fmt_ts, locate_span,
-                                                ordered_rows, predicted_rows,
-                                                probe_compare, realign_rows,
-                                                split_predicted, vad_summary)
+                                                 capability_config_schema, find_gaps, fmt_ts,
+                                                 locate_span, ordered_rows, predicted_rows,
+                                                 probe_compare, realign_rows, split_predicted,
+                                                 vad_summary)
 
 
 def _row(i, s, e, text="t"):

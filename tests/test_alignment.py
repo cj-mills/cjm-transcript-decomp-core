@@ -2,14 +2,12 @@
 
 Projected from the alignment notebook's smoke-check cell at the golden-reference flip
 (pure logic; deterministic)."""
-from cjm_transcript_decomp_core.alignment import (
-    assign_words_to_chunks,
-    build_segments_from_alignment,
-    map_fa_words_to_text,
-    sentence_end_word_indices,
-    split_chunks_at_sentence_gaps,
-    tier1_alignment_checks,
-)
+
+from cjm_transcript_decomp_core.alignment import (assign_words_to_chunks,
+                                                  build_segments_from_alignment,
+                                                  map_fa_words_to_text, sentence_end_word_indices,
+                                                  split_chunks_at_sentence_gaps,
+                                                  tier1_alignment_checks)
 from cjm_transcript_decomp_core.models import FAWord, VADChunk
 
 TEXT = "Hello world. Foo bar."

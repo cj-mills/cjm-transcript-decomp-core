@@ -33,6 +33,7 @@ the new `cjm-ctl logs --chunks` death rattle.
 I8 note: this run is pure cache-hit + default configs — no persisted-config
 mutation (capability_configs.db inspected empty at kickoff).
 """
+
 import json
 import sqlite3
 import subprocess

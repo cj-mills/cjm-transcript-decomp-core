@@ -5,11 +5,10 @@ tests_manual pilot probe, per the TUI craft register)."""
 
 import json
 from pathlib import Path
-from cjm_transcript_decomp_core.launch import (batch_argv, build_parser,
-                                           event_split_batch_error,
-                                           resolve_split_flags)
-from cjm_transcript_decomp_core.runs import (DecompIndex, PropsetIndex,
-                                            SourceRunIndex, group_batches)
+
+from cjm_transcript_decomp_core.launch import (batch_argv, build_parser, event_split_batch_error,
+                                               resolve_split_flags)
+from cjm_transcript_decomp_core.runs import DecompIndex, group_batches, PropsetIndex, SourceRunIndex
 
 
 def _src_manifest(run_id, created, transcribers):

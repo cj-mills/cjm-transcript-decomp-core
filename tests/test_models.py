@@ -1,17 +1,11 @@
 """Tests for cjm_transcript_decomp_core.models — decomposition data shapes.
 
 Projected from the models notebook's smoke-check cell at the golden-reference flip."""
+
 import re
 
-from cjm_transcript_decomp_core.models import (
-    DecompManifest,
-    DecompSegment,
-    DecompSourceRecord,
-    FAWord,
-    SegmentVariant,
-    VADChunk,
-    new_run_id,
-)
+from cjm_transcript_decomp_core.models import (DecompManifest, DecompSegment, DecompSourceRecord,
+                                               FAWord, new_run_id, SegmentVariant, VADChunk)
 
 
 def test_faword_from_wire_tolerates_extra_keys():

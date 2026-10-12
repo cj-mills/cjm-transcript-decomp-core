@@ -7,17 +7,17 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
-from cjm_transcript_graph_schema.schema import (audio_rendition_node_id, audio_segment_node_id,
-                                                RESPINE_OP_VERB, RespinedChunkEntry,
-                                                SEGMENT_SUPERSEDED_BY_PROP, segment_node_id,
-                                                source_node_id, SOURCE_RESPINED_CHUNKS_PROP)
-
 from cjm_transcript_decomp_core import respine as RS
 from cjm_transcript_decomp_core.cli import build_parser
 from cjm_transcript_decomp_core.graph import build_extension_payload
-from cjm_transcript_decomp_core.models import DecompConfig, DecompManifest, DecompSegment, SegmentVariant
+from cjm_transcript_decomp_core.models import (DecompConfig, DecompManifest, DecompSegment,
+                                               SegmentVariant)
 from cjm_transcript_decomp_core.pipeline import build_alignment_composition, decomp_replay_handlers
 from cjm_transcript_decomp_core.retire import apply_spine_fact
+from cjm_transcript_graph_schema.schema import (audio_rendition_node_id, audio_segment_node_id,
+                                                RESPINE_OP_VERB, RespinedChunkEntry,
+                                                segment_node_id, SEGMENT_SUPERSEDED_BY_PROP,
+                                                source_node_id, SOURCE_RESPINED_CHUNKS_PROP)
 
 H = "sha256:l1vel1vel1vel1vel1ve"
 SRC_HASH = "sha256:src"

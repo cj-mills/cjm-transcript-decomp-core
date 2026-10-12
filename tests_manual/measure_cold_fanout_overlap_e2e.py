@@ -21,6 +21,7 @@ VAD∥FA co-run 7.6s = 98% of the shorter lane; verify_source all-True x2.
 Run from the repo root in the cjm-transcript-decomp-core env:
     python tests_manual/measure_cold_fanout_overlap_e2e.py <transcription-manifest.json>
 """
+
 import asyncio
 import logging
 import sys

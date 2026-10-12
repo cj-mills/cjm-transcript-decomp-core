@@ -1,6 +1,7 @@
 """Tests for cjm_transcript_decomp_core.cli — parser smoke checks (no capabilities involved).
 
 Projected from the cli notebook's parser-check cell at the golden-reference flip."""
+
 from cjm_transcript_decomp_core.cli import build_parser
 
 

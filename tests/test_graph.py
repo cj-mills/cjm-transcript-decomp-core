@@ -2,15 +2,11 @@
 
 Projected from the graph notebook's smoke-check cell at the golden-reference flip
 (pure; no capabilities involved)."""
-from cjm_transcript_graph_schema.schema import (
-    audio_rendition_node_id,
-    audio_segment_node_id,
-    source_node_id,
-    transcript_node_id,
-)
 
 from cjm_transcript_decomp_core.graph import build_extension_payload, resolve_root_ids
 from cjm_transcript_decomp_core.models import DecompSegment, SegmentVariant
+from cjm_transcript_graph_schema.schema import (audio_rendition_node_id, audio_segment_node_id,
+                                                source_node_id, transcript_node_id)
 
 SOURCE_ENTRY = {
     "source_path": "/media/ep1.mp3",
