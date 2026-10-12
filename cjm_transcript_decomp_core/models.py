@@ -19,6 +19,7 @@ class FAWord:
     three-field DTO (pass-2 evidence: the typed FA result belongs to the
     forced-alignment adapter interface).
     """
+
     text: str          # The aligned word (punctuation typically stripped by the model)
     start_time: float  # Word start in seconds (relative to the segment audio)
     end_time: float    # Word end in seconds (relative to the segment audio)
@@ -39,6 +40,7 @@ class FAWord:
 @dataclass
 class VADChunk:
     """A voice-activity time range within one pipeline segment (segment-local)."""
+
     index: int         # Chunk index within the pipeline segment
     start_time: float  # Start in seconds (relative to the segment audio)
     end_time: float    # End in seconds (relative to the segment audio)
@@ -57,6 +59,7 @@ class TextSegment:
     card-stack types); the core carries only the alignment-relevant fields
     (E11 precedent — keep core logic free of UI-adjacent deps).
     """
+
     index: int                                # Position within its pipeline segment
     text: str                                 # Segment text content
     source_id: Optional[str] = None           # Upstream transcription row id (job_id)
@@ -73,6 +76,7 @@ class SegmentVariant:
     committed Segment node — text is stored ONCE per transcriber at the coarse
     Transcript node; fine-grained variants are SLICES, never duplicated text
     (Thread-1 slices-until-promoted)."""
+
     transcriber: str            # Transcriber capability name
     text: str                   # This transcriber's text for the chunk
     start_char: Optional[int]   # Char offset into that transcriber's pipeline-segment text
@@ -91,6 +95,7 @@ class DecompSegment:
     across transcribers by construction; `text` is the AUTHORITATIVE
     (accuracy-transcriber) alignment, with every transcriber's chunk text
     riding `variants` (the authoritative one included)."""
+
     index: int             # Source-wide 0-based fine-spine position
     text: str              # Authoritative text (the --text-from transcriber's alignment; "" = no aligned words)
     start_time: float      # Start in source-audio seconds (navigation)
@@ -110,6 +115,7 @@ class DecompSegment:
 @dataclass
 class DecompConfig:
     """Configuration for one transcript-decomposition run."""
+
     vad_capability: str = "cjm-capability-silero-vad"                    # VAD capability id
     fa_capability: str = "cjm-capability-qwen3-forced-aligner"  # Forced-alignment capability id
     graph_capability: str = "cjm-capability-graph-sqlite"                     # Graph-storage capability id
@@ -139,6 +145,7 @@ class DecompSourceRecord:
     """Record of one Source whose fine spine this run committed (stage 5:
     `Document` dissolved into `Source` — decomp EXTENDS the transcription-
     emitted root rather than creating a document)."""
+
     source_node_id: str  # Graph Source node id (deterministic; recomputable from the content hash)
     source_path: str     # Originating source audio path (from the upstream manifest)
     title: str           # Source display title
@@ -159,6 +166,7 @@ class DecompManifest:
 
     Schema 0.2.0 (stage 5): `documents` became `sources` (Document dissolved
     into Source); entries carry the deterministic Source node id."""
+
     run_id: str             # Unique run identifier
     created_at: float       # Unix timestamp at run start
     config: Dict[str, Any]  # DecompConfig snapshot

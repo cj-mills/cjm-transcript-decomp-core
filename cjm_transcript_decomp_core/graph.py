@@ -143,6 +143,7 @@ class SourceVerification:
     """Skeptical-lens verification of one Source's fine-spine extension under a
     specific rendition set, computed by querying the graph directly (never
     trusting run state)."""
+
     source_id: str             # Verified Source node id
     title: str                 # Source title (read back from the graph)
     audio_segment_count: int   # AudioSegment nodes found under the Source (coarse spine; rendition-independent)
