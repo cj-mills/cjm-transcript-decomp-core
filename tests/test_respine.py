@@ -252,8 +252,12 @@ class _Graph:
                         ok = False
                 if ok:
                     rows.append({"id": sid, **{k: p.get(k) for k in (q.get("project") or [])}})
-            off, lim = q.get("offset") or 0, q.get("limit")
-            return SimpleNamespace(rows=rows[off:off + lim] if lim else rows[off:])
+            # The store's keyset contract (ae2b196e): a bounded or cursored read is in id
+            # order, the rows after the cursor, then the limit.
+            if q.get("limit") is not None or q.get("after") is not None:
+                rows = sorted((r for r in rows if q.get("after") is None or r["id"] > q["after"]),
+                              key=lambda r: r["id"])
+            return SimpleNamespace(rows=rows[:q["limit"]] if q.get("limit") else rows)
         if method == "query_edges":
             tg = set(q.get("target_ids") or [])
             return SimpleNamespace(rows=[{"id": f"{r}-{s}-{t}", "source_id": s, "target_id": t}

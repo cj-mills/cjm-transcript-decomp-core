@@ -276,17 +276,20 @@ async def spine_segment_ids(
 ) -> List[str]:  # Every Segment id on that spine
     where = ([PropertyPredicate("skeleton_hash", "eq", skeleton_hash)] if skeleton_hash
              else [PropertyPredicate("skeleton_hash", "is_null")])
+    # Keyset pages on the id (finding ae2b196e): an OFFSET page re-scanned to its offset
+    # and, with no order, could skip or repeat a segment under a concurrent writer -- a
+    # retire's dependents gate then under-counts.
     ids: List[str] = []
-    offset = 0
+    after: Optional[str] = None
     while True:
         q = NodeQuery(label=TranscriptGraphLabels.SEGMENT, project=[], where=where,
                       related=RelationPredicate(SpineRelations.PART_OF, node_ids=list(rendition_ids)),
-                      limit=page, offset=offset)
+                      limit=page, after=after)
         rows = _rows(await graph_task(queue, graph_id, "query_nodes", query=q.to_dict()))
         ids.extend(r["id"] for r in rows)
         if len(rows) < page:
             return ids
-        offset += len(rows)
+        after = rows[-1]["id"]
 
 
 async def spine_dependents(

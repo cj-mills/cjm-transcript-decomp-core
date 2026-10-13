@@ -559,10 +559,10 @@ async def backfill_provenance_command(
     try:
         per_source: Dict[str, List[Dict[str, Any]]] = {}
         seg_counts: Dict[str, int] = {}
-        offset = 0
+        after: Optional[str] = None  # keyset pages on the id, never OFFSET (finding ae2b196e)
         while True:
             nq = NodeQuery(label="Segment", project=["text_from", "source_id", "sources"],
-                           limit=args.page_size, offset=offset)
+                           limit=args.page_size, after=after)
             res = await graph_task(queue, args.graph_capability, "query_nodes", query=nq.to_dict())
             rows = list(res.rows or [])
             for row in rows:
@@ -573,7 +573,7 @@ async def backfill_provenance_command(
                 per_source.setdefault(sid, []).extend(provenance_edges_from_segment_wire(row))
             if len(rows) < args.page_size:
                 break
-            offset += len(rows)
+            after = rows[-1]["id"]
         total_edges = sum(len(v) for v in per_source.values())
         if args.dry_run:
             for sid in sorted(per_source):

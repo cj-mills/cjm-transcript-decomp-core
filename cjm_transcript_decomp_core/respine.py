@@ -341,16 +341,16 @@ async def live_spine_index(
     where = [PropertyPredicate("skeleton_hash", "eq", skeleton_hash),
              PropertyPredicate(SEGMENT_SUPERSEDED_BY_PROP, "is_null")]
     out: List[Tuple[str, int]] = []
-    offset = 0
+    after: Optional[str] = None  # keyset pages on the id, never OFFSET (finding ae2b196e)
     while True:
         q = NodeQuery(label=TranscriptGraphLabels.SEGMENT, project=["index"], where=where,
                       related=RelationPredicate(SpineRelations.PART_OF, node_ids=list(rendition_ids)),
-                      limit=page, offset=offset)
+                      limit=page, after=after)
         rows = _rows(await graph_task(queue, graph_id, "query_nodes", query=q.to_dict()))
         out.extend((r["id"], int(r.get("index") or 0)) for r in rows)
         if len(rows) < page:
             break
-        offset += len(rows)
+        after = rows[-1]["id"]
     return sorted(out, key=lambda x: x[1])
 
 

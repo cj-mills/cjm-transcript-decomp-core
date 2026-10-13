@@ -136,9 +136,13 @@ class _FakeGraph:
                 if not ok:
                     continue
                 rows.append({"id": i, **{k: p.get(k) for k in (q.get("project") or [])}, "created_at": n.get("created_at")})
-            off = q.get("offset") or 0
-            lim = q.get("limit")
-            rows = rows[off:off + lim] if lim else rows[off:]
+            # The store's keyset contract (ae2b196e): a bounded or cursored read is in id
+            # order, the rows after the cursor, then the limit.
+            if q.get("limit") is not None or q.get("after") is not None:
+                rows = sorted((r for r in rows if q.get("after") is None or r["id"] > q["after"]),
+                              key=lambda r: r["id"])
+            if q.get("limit"):
+                rows = rows[:q["limit"]]
             return SimpleNamespace(rows=rows)
         if method == "query_edges":
             q = kw["query"]
@@ -193,6 +197,17 @@ def test_retire_gate_and_fact_op(monkeypatch, tmp_path):
     g.nodes["src"]["properties"].pop(R.RETIRED_SPINES_PROP)
     asyncio.run(R.apply_spine_fact(g, "graph", op))
     assert H_NEW in g.nodes["src"]["properties"][R.RETIRED_SPINES_PROP]
+
+
+def test_spine_segment_ids_walks_keyset_pages(monkeypatch):
+    # Finding ae2b196e: the spine read pages on the id cursor -- every segment exactly
+    # once, across pages, the last one short (page=2 over a three-segment spine).
+    g = _seed(_FakeGraph())
+    monkeypatch.setattr(R, "graph_task", g)
+    ids = asyncio.run(R.spine_segment_ids(g, "graph", ["rend"], H_OLD, page=2))
+    assert ids == [f"seg-{H_OLD[-3:]}-{k}" for k in range(3)]
+    cursors = [kw["query"]["after"] for m, kw in g.calls if m == "query_nodes"]
+    assert cursors == [None, f"seg-{H_OLD[-3:]}-1"]
 
 
 def test_plan_superseded_and_compact(monkeypatch, tmp_path):
