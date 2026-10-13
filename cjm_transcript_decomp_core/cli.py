@@ -204,7 +204,8 @@ def build_parser() -> argparse.ArgumentParser:  # Configured CLI parser
                     help="Scan + report what would move (and any dangling reference); write nothing")
     cs.add_argument("--prove-rebuild", default=None, metavar="TMP_DB",
                     help="After compacting, rebuild the compacted journal into TMP_DB (fresh path) "
-                         "and compare id-set digests with the live db (P-49); slow at scale")
+                         "and compare it with the live db element for element -- ids, every "
+                         "property, both time columns (ruling f8b9c728); slow at scale")
     _spine_plumbing(cs)
 
     # ---- respine-chunk: chunk escalation WITH decomposition (work item 7a5e9c84, ruling 0b4d5cfa) ----
@@ -723,18 +724,18 @@ async def spine_command(
                     print("WARNING: the family still names retired ids — inspect before the next rebuild")
                     return 2
             if args.prove_rebuild and not args.dry_run:
-                from cjm_context_graph_layer.rebuild import digests_equal, idset_digest, rebuild_db
+                from cjm_context_graph_layer.graphdiff import render_diff
+                from cjm_context_graph_layer.rebuild import diff_dbs, rebuild_db
                 if Path(args.prove_rebuild).exists():
                     raise SystemExit(f"--prove-rebuild target exists: {args.prove_rebuild} (needs a fresh path)")
                 await queue.stop()  # the rebuild stands up its own stack on the fresh db
                 counts = await rebuild_db(args.prove_rebuild, journal_path, args.manifests_dir,
                                           graph_capability=gid)
-                live, fresh = idset_digest(str(effective)), idset_digest(args.prove_rebuild)
-                ok = digests_equal(live, fresh)
-                print(f"proof: rebuilt {sum(v for k, v in counts.items() if k.endswith('_added'))} wire(s); "
-                      f"live nodes/edges {live['nodes']}/{live['edges']} vs rebuilt "
-                      f"{fresh['nodes']}/{fresh['edges']} — {'EQUAL' if ok else 'DIFFER'}")
-                return 0 if ok else 2
+                res = await diff_dbs(str(effective), args.prove_rebuild, args.manifests_dir,
+                                     graph_capability=gid)
+                print(f"proof: rebuilt {sum(v for k, v in counts.items() if k.endswith('_added'))} wire(s)")
+                print(render_diff(res))
+                return 0 if res["clean"] else 2
             return 0
         raise SystemExit(f"unknown spine command: {args.command}")
     finally:
