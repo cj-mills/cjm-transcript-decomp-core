@@ -5,42 +5,42 @@ capabilities:
 - name: sys-mon-nvidia
   env_name: test-sys-mon
   env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-monitor-nvidia/main/environment.yml
-  package: cjm-capability-monitor-nvidia>=0.0.25
+  package: cjm-capability-monitor-nvidia>=0.0.26
   interface_libs:
-  - cjm-capability-primitives>=0.0.12
+  - cjm-capability-primitives>=0.0.13
 - name: silero-vad
   env_name: test-silero-vad
   env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-silero-vad/main/environment.yml
-  package: cjm-capability-silero-vad>=0.0.28
+  package: cjm-capability-silero-vad>=0.0.29
   interface_libs:
-  - cjm-capability-primitives>=0.0.12
+  - cjm-capability-primitives>=0.0.13
   adapters:
-  - lib: cjm-vad-adapter-interface>=0.0.10
+  - lib: cjm-vad-adapter-interface>=0.0.11
     impl: cjm_vad_adapter_interface.generic:GenericVADAdapter
 - name: pysbd
   env_name: test-pysbd
   env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-pysbd/main/environment.yml
   package: cjm-capability-pysbd>=0.0.1
   interface_libs:
-  - cjm-capability-primitives>=0.0.12
+  - cjm-capability-primitives>=0.0.13
   adapters:
-  - lib: cjm-sentence-segmentation-adapter-interface>=0.0.1
+  - lib: cjm-sentence-segmentation-adapter-interface>=0.0.2
     impl: cjm_sentence_segmentation_adapter_interface.generic:GenericSentenceSegmentationAdapter
 - name: qwen3-forced-aligner
   env_name: test-qwen3-fa
   env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-qwen3-forced-aligner/main/environment.yml
-  package: cjm-capability-qwen3-forced-aligner>=0.0.27
+  package: cjm-capability-qwen3-forced-aligner>=0.0.28
   interface_libs:
-  - cjm-capability-primitives>=0.0.12
+  - cjm-capability-primitives>=0.0.13
   adapters:
   - lib: cjm-forced-alignment-adapter-interface>=0.0.15
     impl: cjm_forced_alignment_adapter_interface.generic:GenericForcedAlignmentAdapter
 - name: sqlite-graph
   env_name: test-sqlite-graph
   env_file: https://raw.githubusercontent.com/cj-mills/cjm-capability-graph-sqlite/main/environment.yml
-  package: cjm-capability-graph-sqlite>=0.0.29
+  package: cjm-capability-graph-sqlite>=0.0.31
   interface_libs:
-  - cjm-context-graph-primitives>=0.0.17
+  - cjm-context-graph-primitives>=0.0.18
   adapters:
-  - lib: cjm-graph-storage-adapter-interface>=0.0.8
+  - lib: cjm-graph-storage-adapter-interface>=0.0.9
     impl: cjm_graph_storage_adapter_interface.generic:GenericGraphStorageAdapter
