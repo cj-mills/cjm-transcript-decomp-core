@@ -60,6 +60,12 @@ class SegmentStack:
         await queue.start()
         self._manager, self._queue, self.db_path = manager, queue, db_path
 
+    @property
+    def queue(self) -> Optional[JobQueue]:  # The open seat's queue (None until open)
+        """The seat's job queue, for a caller's own reads beside the seat's (the gesture
+        seam's covariates, design detail 4389a579)."""
+        return self._queue
+
     async def read_segments(self, segment_ids: List[str]) -> List[Dict[str, Any]]:
         """Projected rows for the manifest's segment_ids, in ID-LIST order.
 
