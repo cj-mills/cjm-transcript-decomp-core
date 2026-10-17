@@ -47,9 +47,9 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from cjm_context_graph_layer.declare import Derivation, derivation_to_graph
 from cjm_context_graph_layer.grammar import make_edge, SpineRelations
 from cjm_context_graph_layer.identity import derive_node_id
-from cjm_context_graph_layer.journal import journal_extend
+from cjm_context_graph_layer.journal import journal_extend, journal_op, write_window
 from cjm_context_graph_layer.ops import graph_task
-from cjm_context_graph_primitives.journal import append_op, op_clocked
+from cjm_context_graph_primitives.journal import op_clocked
 from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPredicate,
                                                 RelationPredicate)
 from cjm_substrate.core.journal_store import SubstrateEventType
@@ -59,9 +59,8 @@ from cjm_transcript_decomp_core.models import (DecompConfig, DecompManifest, Dec
                                                new_run_id)
 from cjm_transcript_decomp_core.pipeline import (_journal_run_event, collect_capability_info,
                                                  decompose_source, resolve_event_propsets)
-from cjm_transcript_decomp_core.retire import (_rows, apply_spine_fact, default_live_spine,
-                                               get_source, list_spines, resolve_spine,
-                                               source_rendition_ids, spine_label)
+from cjm_transcript_decomp_core.retire import (_rows, default_live_spine, get_source, list_spines,
+                                               resolve_spine, source_rendition_ids, spine_label)
 from cjm_transcript_decomp_core.runs import DecompIndex
 from cjm_transcript_graph_schema.schema import (external_config_hash, external_transcriber_name,
                                                 RESPINE_OP_VERB, RespinedChunkEntry,
@@ -458,7 +457,6 @@ def render_chunk_prompt(
     return r
 
 
-@op_clocked
 async def respine_chunk(
     manager: Any,              # CapabilityManager holding the graph capability (the verb loads VAD/FA/SEG itself)
     queue: Any,                # Started job queue
@@ -479,9 +477,56 @@ async def respine_chunk(
     dry_run: bool = False,     # Resolve + plan everything up to the landing; write nothing
     sysmon_capability: Optional[str] = None,  # Loaded first when given (GPU attribution)
 ) -> Dict[str, Any]:  # The readout: counts, ids, paths
-    """Mode two (--text-file): land -> re-derive the chunk under the live policy ->
-    extend the live spine (salted ids) -> transfer the two source-truth classes ->
-    ONE chunk-respine fact (stamps + renumber + Source entry)."""
+    """Mode two (--text-file): land -> re-derive the chunk under the live policy -> extend the live
+    spine (salted ids) -> transfer the two source-truth classes -> ONE chunk-respine fact.
+
+    THE CHAIN IS ONE UNIT OF WORK (ruling 6683f49e (1), 547f4123 (1)): one write window holds
+    the family's writer from the dependents gate to the fact, so every refusal is planned on a db
+    holding its whole journal and each op -- the landing, the extension, its Derivation, the
+    transfer's corrections, the fact -- is planned on what the one before it left, journaled,
+    then applied. A crash mid-chain leaves the appended ops for the next writer's heal, and a
+    re-run re-plans the remainder (the landing collides into its Transcript, the fact's op id
+    catches a completed respine). The lock is held across the policy stack's load and the
+    re-derivation, so another writer of the workflow journal waits for the chunk. A dry run is a
+    reader and opens no writer."""
+    if dry_run:
+        return await _respine_chunk(manager, queue, load_capabilities, graph_id=graph_id,
+                                    journal_path=journal_path, ctx=ctx, text=text,
+                                    model_id=model_id, prompt_hash=prompt_hash,
+                                    text_source=text_source, reason=reason, actor=actor,
+                                    runs_dir=runs_dir, workspace=workspace, strand=strand,
+                                    dry_run=True, sysmon_capability=sysmon_capability)
+    async with write_window(queue, graph_id, journal_path, what="chunk-respine"):
+        return await _respine_chunk(manager, queue, load_capabilities, graph_id=graph_id,
+                                    journal_path=journal_path, ctx=ctx, text=text,
+                                    model_id=model_id, prompt_hash=prompt_hash,
+                                    text_source=text_source, reason=reason, actor=actor,
+                                    runs_dir=runs_dir, workspace=workspace, strand=strand,
+                                    dry_run=False, sysmon_capability=sysmon_capability)
+
+
+@op_clocked
+async def _respine_chunk(
+    manager: Any,              # CapabilityManager holding the graph capability (the verb loads VAD/FA/SEG itself)
+    queue: Any,                # Started job queue
+    load_capabilities: Callable[..., None],  # cli.load_capabilities (manager, ids, configs) — injected so the seat stays testable
+    *,
+    graph_id: str,
+    journal_path: Optional[str],
+    ctx: Dict[str, Any],       # resolve_chunk_context output
+    text: str,                 # The pasted transcript
+    model_id: str,             # The external model id (files as `<model id>/manual`)
+    prompt_hash: str,          # The prompt TEMPLATE's hash ("" = none recorded)
+    text_source: str,          # Provenance ("paste", "gemini web ui", ...)
+    reason: str,               # Why (journaled)
+    actor: str,
+    runs_dir: Path,
+    workspace: Any = None,     # Resolved Workspace (manifests record ${WS}/ paths) or None
+    strand: bool = False,      # Strand the non-transferable dependents (the explicit say-so)
+    dry_run: bool = False,     # Resolve + plan everything up to the landing; write nothing
+    sysmon_capability: Optional[str] = None,  # Loaded first when given (GPU attribution)
+) -> Dict[str, Any]:  # The readout: counts, ids, paths
+    """`respine_chunk`'s chain, run inside its write window (or, dry, as a reader)."""
     source_id = source_node_id(str(ctx["source_entry"].get("content_hash") or ""))
     skeleton_hash: str = ctx["skeleton_hash"]
     old = ctx["old_segments"]
@@ -695,9 +740,7 @@ async def respine_chunk(
                                    stranded=stranded_ids, carried=carried, straddles=straddles)
         op = build_respine_op(source_id=source_id, entry=entry, skeleton_hash=skeleton_hash,
                               renumber=renumber, existing_entries=existing_entries, actor=actor)
-        await apply_spine_fact(queue, graph_id, op)
-        if journal_path:
-            append_op(journal_path, op, dedup=False)
+        await journal_op(queue, graph_id, op, journal_path)
 
         # 6. The chunk-scoped decomp manifest (0.2.7): a run row the decomp app paints as ⤷ respine.
         manifest = DecompManifest(

@@ -11,7 +11,8 @@ from cjm_capability_primitives.forced_alignment import ForcedAlignResult
 from cjm_capability_primitives.sentence_segmentation import SentenceSegmentationResult
 from cjm_capability_primitives.vad import VADResult
 from cjm_context_graph_layer.declare import Derivation, derivation_to_graph
-from cjm_context_graph_layer.journal import journal_extend, sidecar_journal_path, wires_handlers
+from cjm_context_graph_layer.journal import (journal_extend, sidecar_journal_path, wires_handlers,
+                                             write_window)
 from cjm_context_graph_layer.ops import graph_task
 from cjm_substrate.core.empirical_store import compute_config_hash
 from cjm_substrate.core.journal_store import JournalEvent, SubstrateEventType
@@ -604,7 +605,11 @@ async def run_decomp(
     # Pipeline writes append through to the graph db's SIDECAR journal (DEC ccbab9f5 /
     # finding 4219da27): unjournaled ingestion would erode db-rebuildability.
     graph_db_path = (manifest.capabilities.get(cfg.graph_capability) or {}).get("db_path")
-    graph_journal_path = sidecar_journal_path(str(graph_db_path)) if graph_db_path else None
+    if not graph_db_path:  # no sidecar journal, and nothing writes the graph unjournaled (65f4a6c9 (3))
+        raise ValueError(f"run {run_id}: the graph capability {cfg.graph_capability!r} records no "
+                         f"db_path, so the extension has no sidecar journal -- configure the "
+                         f"capability's db_path (there is no unjournaled decomp)")
+    graph_journal_path = sidecar_journal_path(str(graph_db_path))
 
     sources = src.get("sources", []) or []
     status = "completed"
@@ -651,27 +656,31 @@ async def run_decomp(
                 status = "aborted"
                 break
 
-            res = await journal_extend(queue, cfg.graph_capability, nodes, edges,
-                                       journal_path=graph_journal_path, verb="spine-extension",
-                                       actor="pipeline:cjm-transcript-decomp-core", run=run_id,
-                                       args={"source_id": ids["source"],
-                                             "segments": len(ids["segments"]),
-                                             "text_from": text_from})
-            logger.info(f"[src {i}] extension: +{res.nodes_added} node(s) "
-                        f"({res.nodes_verified} verified present), +{res.edges_added} edge(s) "
-                        f"({res.edges_existing} existing)")
-            if res.nodes_added:
-                d = Derivation(
-                    actor="host:cjm-transcript-decomp-core", method="alignment-fold/v1",
-                    input_ids=ids["transcripts_used"], output_ids=[ids["source"]],
-                    properties={"run_id": run_id, "segments": len(ids["segments"]),
-                                "text_from": text_from},
-                )
-                dn, de = derivation_to_graph(d)
-                await journal_extend(queue, cfg.graph_capability, [dn], de,
-                                     journal_path=graph_journal_path, verb="derivation",
-                                     actor="pipeline:cjm-transcript-decomp-core", run=run_id,
-                                     args={"method": "alignment-fold/v1"})
+            # The extension and the Derivation it plans from what the extension added: one
+            # unit of work (ruling 6683f49e (1)).
+            async with write_window(queue, cfg.graph_capability, graph_journal_path,
+                                    what="spine-extension"):
+                res = await journal_extend(queue, cfg.graph_capability, nodes, edges,
+                                           journal_path=graph_journal_path, verb="spine-extension",
+                                           actor="pipeline:cjm-transcript-decomp-core", run=run_id,
+                                           args={"source_id": ids["source"],
+                                                 "segments": len(ids["segments"]),
+                                                 "text_from": text_from})
+                logger.info(f"[src {i}] extension: +{res.nodes_added} node(s) "
+                            f"({res.nodes_verified} verified present), +{res.edges_added} edge(s) "
+                            f"({res.edges_existing} existing)")
+                if res.nodes_added:
+                    d = Derivation(
+                        actor="host:cjm-transcript-decomp-core", method="alignment-fold/v1",
+                        input_ids=ids["transcripts_used"], output_ids=[ids["source"]],
+                        properties={"run_id": run_id, "segments": len(ids["segments"]),
+                                    "text_from": text_from},
+                    )
+                    dn, de = derivation_to_graph(d)
+                    await journal_extend(queue, cfg.graph_capability, [dn], de,
+                                         journal_path=graph_journal_path, verb="derivation",
+                                         actor="pipeline:cjm-transcript-decomp-core", run=run_id,
+                                         args={"method": "alignment-fold/v1"})
 
             # Fine spine hangs under the run's renditions — verify scopes there,
             # id-scoped to THIS run's segments (a coexisting sibling spine under

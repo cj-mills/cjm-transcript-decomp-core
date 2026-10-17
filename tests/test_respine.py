@@ -295,3 +295,27 @@ def test_live_reads_apply_the_one_predicate(monkeypatch):
     assert by["c1"]["superseded"] is False and by["c2"]["superseded"] is True
     dep = RS.classify_dependents(rows, {"a1", "a2"})
     assert [c["id"] for c in dep["stranded"]] == ["c1"] and dep["speakers"] == []
+
+
+def test_respine_chunk_is_one_unit_of_work(monkeypatch, tmp_path):
+    """Ruling 6683f49e (1) / 547f4123 (1): the chain runs inside ONE write window -- the family's
+    writer opened (lock + heal) before the dependents gate plans anything; a dry run is a reader
+    and opens none; with no journal path the respine refuses before reading anything."""
+    from cjm_context_graph_layer.journal import UnjournaledWrite
+    from cjm_context_graph_layer.testing import MemGraph
+
+    seen = []
+
+    async def chain(manager, queue, load_capabilities, **kw):
+        seen.append((kw["dry_run"], queue.methods.count("journal_cursors")))
+        return {"dry_run": kw["dry_run"]}
+
+    monkeypatch.setattr(RS, "_respine_chunk", chain)
+    kw = dict(graph_id="g", ctx={}, text="t", model_id="m", prompt_hash="", text_source="paste",
+              reason="r", actor="t", runs_dir=tmp_path)
+    g = MemGraph()
+    asyncio.run(RS.respine_chunk(None, g, None, journal_path=None, dry_run=True, **kw))
+    with pytest.raises(UnjournaledWrite, match="chunk-respine"):
+        asyncio.run(RS.respine_chunk(None, g, None, journal_path=None, **kw))
+    asyncio.run(RS.respine_chunk(None, g, None, journal_path=str(tmp_path / "w.writes.jsonl"), **kw))
+    assert seen == [(True, 0), (False, 1)]  # the writer was open (one cursor read) as the chain began

@@ -112,7 +112,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `read_dependents` _function_ — What points at the old segments: every Correction with a CORRECTS edge into
 - `render_chunk_prompt` _function_ — Mode one (--prompt): the chunk's escalation prompt WITH CONTEXT — no writes.
 - `resolve_chunk_context` _function_ — Resolve the live spine -> its decomp manifest -> the transcription manifest it
-- `respine_chunk` _function_ — Mode two (--text-file): land -> re-derive the chunk under the live policy ->
+- `respine_chunk` _function_ — Mode two (--text-file): land -> re-derive the chunk under the live policy -> extend the live
 - `respine_op_id` _function_ — The op id `superseded_by` names: a function of (source, landed transcript).
 - `source_entry_for` _function_ — The transcription manifest's entry for a Source, by recomputed identity (pure).
 - `transfer_handler` _function_ — Discover the correction core's chunk-scoped transfer through the entry-point
@@ -121,12 +121,12 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 
 - `annotate_spines` _function_ — Mark each spine row with its retirement state (pure; rows copied).
 - `apply_spine_fact` _function_ — Replay handler for spine-retire / spine-compaction / chunk-respine: property merges
-- `compact_retired` _function_ — The compact act over every retired, not-yet-compacted spine of the given sources:
+- `compact_retired` _function_ — The compact act over every retired, not-yet-compacted spine of the given sources, THE OP
 - `default_live_spine` _function_ — Which spine opens by default (pure). Preference is a DECLARED fact, never creation order:
 - `dependents_free` _function_
 - `dependents_map` _function_ — Every spine's dependents in one raw read (see DEPENDENTS_SQL); a spine absent from
 - `get_source` _function_ — The Source node as a dict (None when absent).
-- `journal_spine_retire` _function_ — Apply + journal one retirement fact (write-side dual of apply_spine_fact).
+- `journal_spine_retire` _function_ — Journal one retirement fact, then apply it through `apply_spine_fact` (the replay's own
 - `list_sources` _function_ — Every Source (optionally one collection's members).
 - `list_spines` _function_ — The source's coexisting spines, grouped by skeleton hash and annotated with the retirement map.
 - `live_spines` _function_
@@ -134,7 +134,7 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `plan_superseded` _function_ — The batch candidate list: every LIVE spine that is not the source's default (rule (c)) —
 - `resolve_source_id` _function_ — Resolve a human selector to ONE Source (refuses with the candidates).
 - `resolve_spine` _function_ — Resolve a picker-style selector to exactly one spine row (pure); refuses with the roster.
-- `retire_spine` _function_ — The whole retire act: list -> plan (rules a) -> dependents gate (rule b) -> journaled fact.
+- `retire_spine` _function_ — The whole retire act: list -> plan (rules a) -> dependents gate (rule b) -> journaled fact,
 - `retired_spines` _function_ — The Source's retirement map (pure): {spine key: {reason, successor, actor, ts[, compacted]}}.
 - `source_rendition_ids` _function_ — Every AudioRendition under a Source (all chains — retirement is per skeleton, not per chain).
 - `spine_dependents` _function_ — Rule (b)'s evidence: what on the graph points at the spine's segments.

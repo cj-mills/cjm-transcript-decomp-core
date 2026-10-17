@@ -7,6 +7,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from cjm_context_graph_layer.ops import GraphCursorStore
+from cjm_context_graph_primitives.writer import stamp_cursor
+from cjm_substrate.core.queue import JobStatus
 from cjm_transcript_decomp_core import retire as R
 from cjm_transcript_decomp_core.pipeline import decomp_replay_handlers
 
@@ -90,15 +93,29 @@ def test_replay_registry_carries_the_fact_verbs():
 
 class _FakeGraph:
     """A minimal graph_task stand-in: Source nodes with properties, Segments keyed by
-    (rendition, skeleton), CORRECTS/REVIEWED edges, delete_nodes."""
+    (rendition, skeleton), CORRECTS/REVIEWED edges, delete_nodes -- and the queue face the
+    layer's writer reaches it through (its journal cursors, ruling 6683f49e)."""
 
     def __init__(self):
         self.nodes = {}
         self.edges = []
         self.calls = []
+        self.cursors = {}
+
+    async def submit(self, graph_id, task=None, method=None, **kw):  # the layer's graph_task path
+        self._result = await self(self, graph_id, method, **kw)
+        return "j"
+
+    async def wait_for_job(self, jid, timeout=None):
+        return SimpleNamespace(status=JobStatus.completed, result=self._result, error=None)
 
     async def __call__(self, queue, graph_id, method, **kw):
         self.calls.append((method, kw))
+        if method == "journal_cursors":
+            return dict(self.cursors)
+        if method == "record_journal_cursor":
+            self.cursors[kw["family"]] = kw["position"]
+            return True
         if method == "get_node":
             n = self.nodes.get(kw["node_id"])
             return None if n is None else dict(n)
@@ -230,6 +247,7 @@ def test_plan_superseded_and_compact(monkeypatch, tmp_path):
              {"id": "d-new", "source_id": f"seg-{H_NEW[-3:]}-0", "target_id": "t1", "relation_type": "DERIVED_FROM", "properties": {}}]}},
     ]
     jp.write_text("".join(json.dumps(o, sort_keys=True) + "\n" for o in ops))
+    asyncio.run(stamp_cursor(str(jp), GraphCursorStore(g, "graph")))  # the seeded db holds the family
     # plan: the OLD spine is superseded by the newest (no declaration) and dependent-free
     plan = asyncio.run(R.plan_superseded(g, "graph", ["src"]))
     assert len(plan) == 1 and plan[0]["spine"]["skeleton_hash"] == H_OLD and plan[0]["eligible"]
@@ -252,8 +270,27 @@ def test_plan_superseded_and_compact(monkeypatch, tmp_path):
     from cjm_context_graph_primitives.journal import read_journal
     fam = read_journal(str(jp))
     assert fam[-1]["verb"] == R.COMPACTION_VERB
+    # the fact was journaled BEFORE the move, carrying the deletes its apply ran (6683f49e (3))
+    assert fam[-1]["deletes"] == {"node_ids": [f"seg-{H_OLD[-3:]}-{k}" for k in range(3)]}
     assert not any(n["id"].startswith(f"seg-{H_OLD[-3:]}") for o in fam for n in (o.get("wires") or {}).get("nodes", []))
     # a second compaction finds nothing to do
     again = asyncio.run(R.compact_retired(g, "graph", ["src"], journal_path=str(jp), archive_dir=str(tmp_path / "archive"),
                                           label="L2", actor="t"))
     assert again["targets"] == [] and again["report"].ops_scanned == 0
+
+
+def test_compaction_ops_plan_two_spines_of_one_source_cumulatively():
+    """Two spines of one Source compact in one sweep: each fact carries the map the previous
+    fact left (547f4123 (1)), in its own copy -- the second op must not erase the first's stamp,
+    and appending the first op later cannot see the second's edits."""
+    retired = {"a": {"reason": "x"}, "b": {"reason": "y"}, "c": {"reason": "kept", "compacted": {"label": "old"}}}
+    targets = [{"source_id": "src", "key": k, "segment_ids": [f"{k}1", f"{k}2"], "retired": retired}
+               for k in ("a", "b")]
+    first, second = R._compaction_ops(targets, "/arch/x.jsonl", "L", "t")
+    m1 = first["updates"][0]["properties"][R.RETIRED_SPINES_PROP]
+    m2 = second["updates"][0]["properties"][R.RETIRED_SPINES_PROP]
+    assert "compacted" in m1["a"] and "compacted" not in m1["b"]
+    assert m2["a"]["compacted"]["label"] == "L" and m2["b"]["compacted"]["segments"] == 2
+    assert m2["c"] == {"reason": "kept", "compacted": {"label": "old"}}
+    assert first["deletes"] == {"node_ids": ["a1", "a2"]} and second["deletes"] == {"node_ids": ["b1", "b2"]}
+    assert "compacted" not in retired["a"]  # the Source's map as read is never mutated

@@ -29,11 +29,12 @@ import logging
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from cjm_context_graph_layer.compact import compact_journal, CompactReport, scan_references
+from cjm_context_graph_layer.compact import compact_family, compact_journal, scan_references
 from cjm_context_graph_layer.grammar import OverlayRelations, SpineRelations
+from cjm_context_graph_layer.journal import graph_writer, journal_op, write_window
 from cjm_context_graph_layer.ops import graph_task
 from cjm_context_graph_primitives.graph import GraphNode
-from cjm_context_graph_primitives.journal import append_op, op_clocked
+from cjm_context_graph_primitives.journal import op_clocked
 from cjm_context_graph_primitives.query import (EdgeQuery, NodeQuery, PropertyPredicate,
                                                 RelationPredicate)
 from cjm_transcript_graph_schema.schema import (RESPINE_OP_VERB, SEGMENT_SUPERSEDED_BY_PROP,
@@ -51,6 +52,7 @@ LEGACY_KEY = "legacy"                  # Map key for the pre-split spine (skelet
 _CORRECTS = "CORRECTS"
 _REVIEWED = "REVIEWED"
 _ID_BATCH = 500  # ids per batched edge query (SQLite bind-variable headroom)
+_DELETE_BATCH = 2000  # node ids per delete_nodes call when a compaction fact applies
 
 
 # ---- pure: keys, rows, rules ---------------------------------------------------------------
@@ -370,7 +372,14 @@ def _dep_for(dep_map: Optional[Dict[Tuple[str, str], Dict[str, Any]]], source_id
 async def apply_spine_fact(queue: Any, graph_id: str, op: Dict[str, Any]) -> None:
     """Replay handler for spine-retire / spine-compaction / chunk-respine: property merges
     on the Source (and, for a chunk respine, on its Segments — the superseded_by stamps
-    and the renumbered tail ride the same `updates` list)."""
+    and the renumbered tail ride the same `updates` list). A compaction op journaled BEFORE
+    its storage move (ruling 6683f49e (3)) also carries the moved segments as `deletes`,
+    applied first: before the move a replay adds the segments and the op deletes them, after
+    it the deletes are no-ops. An op from before that order carries none (its wires had
+    already left the family when it was appended)."""
+    ids = list((op.get("deletes") or {}).get("node_ids") or [])
+    for i in range(0, len(ids), _DELETE_BATCH):
+        await graph_task(queue, graph_id, "delete_nodes", node_ids=ids[i:i + _DELETE_BATCH])
     for u in op.get("updates") or []:
         await graph_task(queue, graph_id, "update_node", node_id=u["id"], properties=dict(u["properties"]))
 
@@ -387,21 +396,21 @@ async def journal_spine_retire(
     new_map: Dict[str, Dict[str, Any]],    # The FULL new retired_spines map (plan_retire's first result)
     plan: Dict[str, Any],                  # plan_retire's second result
     *,
-    journal_path: Optional[str],           # Sidecar journal (None = unjournaled)
+    journal_path: Optional[str],           # Sidecar journal (None refuses unless `unjournaled`)
     actor: str,
+    unjournaled: bool = False,             # Explicitly write with no journal (scratch graphs, tests)
 ) -> Dict[str, Any]:  # The op as journaled
-    """Apply + journal one retirement fact (write-side dual of apply_spine_fact)."""
+    """Journal one retirement fact, then apply it through `apply_spine_fact` (the replay's own
+    handler; ruling 6683f49e (1))."""
     sp = plan["spine"]
     op = {"verb": RETIRE_VERB, "actor": actor,
           "args": {"act": plan["act"], "source_id": source_id, "spine": plan["key"],
                    "skeleton_hash": sp.get("skeleton_hash"), "split_policy": sp.get("split_policy"),
                    "segments": sp.get("segments"), **{k: v for k, v in plan["entry"].items() if k != "actor"}},
           "updates": [{"id": source_id, "properties": {RETIRED_SPINES_PROP: new_map}}]}
-    await apply_spine_fact(queue, graph_id, op)
-    if journal_path:
-        append_op(journal_path, op, dedup=False)
+    landed = await journal_op(queue, graph_id, op, journal_path, unjournaled=unjournaled)
     logger.info(f"{RETIRE_VERB} {plan['act']}: source {source_id[:8]} spine {plan['key'][:16]}")
-    return op
+    return landed
 
 
 async def retire_spine(
@@ -412,12 +421,29 @@ async def retire_spine(
     reason: str = "",
     successor: Optional[str] = None,
     unretire: bool = False,
-    journal_path: Optional[str],
+    journal_path: Optional[str],     # Sidecar journal (None refuses unless `unjournaled`)
     actor: str,
     force_dependents: bool = False,  # NOT offered by the CLI: rule (b) has no blind override; tests only
     dep_map: Optional[Dict[Tuple[str, str], Dict[str, Any]]] = None,  # Prefetched `dependents_map` (batch callers); None = typed per-spine read
+    unjournaled: bool = False,       # Explicitly write with no journal (scratch graphs, tests)
 ) -> Dict[str, Any]:  # {"op", "plan", "dependents"}
-    """The whole retire act: list -> plan (rules a) -> dependents gate (rule b) -> journaled fact."""
+    """The whole retire act: list -> plan (rules a) -> dependents gate (rule b) -> journaled fact,
+    one unit of work (ruling 6683f49e (1)): the plan and the gate read a db holding its whole
+    journal, under the family's writer the fact's write joins."""
+    async with write_window(queue, graph_id, journal_path, unjournaled=unjournaled, what=RETIRE_VERB):
+        return await _retire_spine(queue, graph_id, source_id, selector, reason=reason,
+                                   successor=successor, unretire=unretire, journal_path=journal_path,
+                                   actor=actor, force_dependents=force_dependents, dep_map=dep_map,
+                                   unjournaled=unjournaled)
+
+
+async def _retire_spine(
+    queue: Any, graph_id: str, source_id: str, selector: str, *, reason: str,
+    successor: Optional[str], unretire: bool, journal_path: Optional[str], actor: str,
+    force_dependents: bool, dep_map: Optional[Dict[Tuple[str, str], Dict[str, Any]]],
+    unjournaled: bool,
+) -> Dict[str, Any]:  # {"op", "plan", "dependents"}
+    """`retire_spine`'s plan and write, run inside its write window."""
     rends = await source_rendition_ids(queue, graph_id, source_id)
     spines = await list_spines(queue, graph_id, source_id, rends)
     if not spines:
@@ -440,7 +466,7 @@ async def retire_spine(
                 f"(correction-core transfer-wordless / the respine plan) or retire the sessions "
                 f"first; nothing cascades")
     op = await journal_spine_retire(queue, graph_id, source_id, new_map, plan,
-                                    journal_path=journal_path, actor=actor)
+                                    journal_path=journal_path, actor=actor, unjournaled=unjournaled)
     return {"op": op, "plan": plan, "dependents": dep}
 
 
@@ -472,23 +498,12 @@ async def plan_superseded(
     return out
 
 
-@op_clocked
-async def compact_retired(
+async def _compaction_targets(
     queue: Any, graph_id: str,
     source_ids: Iterable[str],   # Sources to sweep for retired-but-uncompacted spines
-    *,
-    journal_path: str,           # The workflow journal's live tail
-    archive_dir: str,            # Archive family location (outside the backup mirror)
-    label: str,                  # Compaction label (manifest + split markers)
-    actor: str,
-    dry_run: bool = False,
-    delete_batch: int = 2000,
-) -> Dict[str, Any]:  # {"report": CompactReport, "targets": [...], "deleted": n, "dangling_after": n}
-    """The compact act over every retired, not-yet-compacted spine of the given sources:
-    ONE journal pass for all of them (the scan is O(journal), never O(spines)), then the live-db
-    deletes, then one `spine-compaction` fact per spine, then the static re-scan (must be 0)."""
+) -> List[Dict[str, Any]]:  # [{"source_id", "key", "spine", "segment_ids", "retired"}] -- "retired" = the Source's map as read
+    """Every retired, not-yet-compacted spine of the given sources with its segment ids."""
     targets: List[Dict[str, Any]] = []
-    all_ids: List[str] = []
     for sid in source_ids:
         src = await get_source(queue, graph_id, sid)
         retired = retired_spines((src or {}).get("properties"))
@@ -506,31 +521,68 @@ async def compact_retired(
                 continue
             sp = {"skeleton_hash": skel, "split_policy": None, "segments": len(seg_ids),
                   "retired": True, "retired_reason": e.get("reason"), "successor": e.get("successor")}
-            targets.append({"source_id": sid, "key": key, "spine": sp, "segment_ids": seg_ids})
-            all_ids.extend(seg_ids)
-    report: CompactReport = compact_journal(journal_path, archive_dir, all_ids, label=label,
-                                            dry_run=dry_run, actor=actor)
-    result: Dict[str, Any] = {"report": report, "targets": targets, "deleted": 0, "dangling_after": 0}
-    if dry_run or not targets:
-        return result
-    deleted = 0
+            targets.append({"source_id": sid, "key": key, "spine": sp, "segment_ids": seg_ids,
+                            "retired": retired})
+    return targets
+
+
+def _compaction_ops(
+    targets: List[Dict[str, Any]],  # `_compaction_targets` rows
+    archive: Optional[str],         # Where the moved wires will be (None: nothing moves)
+    label: str,
+    actor: str,
+) -> List[Dict[str, Any]]:  # One spine-compaction op per target, in target order
+    """Plan one `spine-compaction` fact per spine: its segments as the op's deletes, the Source's
+    retired map with the spine stamped compacted as its update. Two spines of one Source plan
+    CUMULATIVELY -- each op carries the map the previous one left (547f4123 (1): op k+1 planned
+    on what op k leaves) -- and each op holds its own copy of the map."""
+    maps: Dict[str, Dict[str, Any]] = {}
+    out: List[Dict[str, Any]] = []
     for t in targets:
-        ids = t["segment_ids"]
-        for i in range(0, len(ids), delete_batch):
-            n = await graph_task(queue, graph_id, "delete_nodes", node_ids=ids[i:i + delete_batch])
-            deleted += int(n or 0)
-        src = await get_source(queue, graph_id, t["source_id"])
-        retired = retired_spines((src or {}).get("properties"))
-        entry = dict(retired.get(t["key"]) or {})
-        entry["compacted"] = {"ts": time.time(), "label": label, "archive": report.archive_path,
+        sid, ids = t["source_id"], t["segment_ids"]
+        current = maps.setdefault(sid, dict(t["retired"]))
+        entry = dict(current.get(t["key"]) or {})
+        entry["compacted"] = {"ts": time.time(), "label": label, "archive": archive,
                               "segments": len(ids), "actor": actor}
-        retired[t["key"]] = entry
-        op = {"verb": COMPACTION_VERB, "actor": actor,
-              "args": {"act": "compact", "source_id": t["source_id"], "spine": t["key"],
-                       "segments": len(ids), "archive": report.archive_path, "label": label},
-              "updates": [{"id": t["source_id"], "properties": {RETIRED_SPINES_PROP: retired}}]}
-        await apply_spine_fact(queue, graph_id, op)
-        append_op(journal_path, op, dedup=False)
-    result["deleted"] = deleted
-    result["dangling_after"] = len(scan_references(journal_path, all_ids))
-    return result
+        current[t["key"]] = entry
+        out.append({"verb": COMPACTION_VERB, "actor": actor,
+                    "args": {"act": "compact", "source_id": sid, "spine": t["key"],
+                             "segments": len(ids), "archive": archive, "label": label},
+                    "deletes": {"node_ids": list(ids)},
+                    "updates": [{"id": sid, "properties": {RETIRED_SPINES_PROP: dict(current)}}]})
+    return out
+
+
+@op_clocked
+async def compact_retired(
+    queue: Any, graph_id: str,
+    source_ids: Iterable[str],   # Sources to sweep for retired-but-uncompacted spines
+    *,
+    journal_path: str,           # The workflow journal's live tail
+    archive_dir: str,            # Archive family location (outside the backup mirror)
+    label: str,                  # Compaction label (manifest + split markers)
+    actor: str,
+    dry_run: bool = False,
+) -> Dict[str, Any]:  # {"report": CompactReport, "targets": [...], "deleted": n, "dangling_after": n}
+    """The compact act over every retired, not-yet-compacted spine of the given sources, THE OP
+    FIRST (ruling 6683f49e (3), the layer's `compact_family`): under the family's writer (lock +
+    heal, so the targets are read on a db holding its whole journal) ONE journal pass for all of
+    them (the scan is O(journal), never O(spines)), then one `spine-compaction` fact per spine --
+    journaled, then applied: its segments deleted from the live db, the spine stamped compacted --
+    and only then the storage move, then the static re-scan (must be 0; the facts' deletes are the
+    tolerated residue). A dry run is a reader: no lock, the scan only."""
+    if dry_run:
+        targets = await _compaction_targets(queue, graph_id, source_ids)
+        ids = [i for t in targets for i in t["segment_ids"]]
+        report = compact_journal(journal_path, archive_dir, ids, label=label, dry_run=True, actor=actor)
+        return {"report": report, "targets": targets, "deleted": 0, "dangling_after": 0}
+    async with graph_writer(queue, graph_id, journal_path) as w:
+        targets = await _compaction_targets(queue, graph_id, source_ids)
+        ids = [i for t in targets for i in t["segment_ids"]]
+        report = await compact_family(
+            w, archive_dir, ids,
+            lambda plan: _compaction_ops(targets, plan.archive_path if plan.moves else None,
+                                         label, actor),
+            label=label, actor=actor)
+    return {"report": report, "targets": targets, "deleted": len(ids),
+            "dangling_after": len(scan_references(journal_path, ids)) if ids else 0}
