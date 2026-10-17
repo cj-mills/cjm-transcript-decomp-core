@@ -29,7 +29,8 @@ import logging
 import time
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from cjm_context_graph_layer.compact import compact_family, compact_journal, scan_references
+from cjm_context_graph_layer.compact import (compact_family, compact_journal, journaled_ops,
+                                             scan_references)
 from cjm_context_graph_layer.grammar import OverlayRelations, SpineRelations
 from cjm_context_graph_layer.journal import graph_writer, journal_op, write_window
 from cjm_context_graph_layer.ops import graph_task
@@ -553,6 +554,22 @@ def _compaction_ops(
     return out
 
 
+def _journaled_compaction_ids(
+    journal_path: str,           # The workflow journal's live tail
+    source_ids: Iterable[str],   # The swept sources
+) -> List[str]:  # Every segment id a journaled spine-compaction fact of these sources deleted
+    """What compactions of these sources already removed from the db (ruling 9d57273a): each
+    journaled fact's deletes -- exactly its spine's ids, which the db no longer holds. Ids that
+    still carry wires in the family (a compaction crashed before its move) move now; ids already
+    moved plan nothing."""
+    wanted = {str(s) for s in source_ids}
+    out: List[str] = []
+    for op in journaled_ops(journal_path, COMPACTION_VERB):
+        if str((op.get("args") or {}).get("source_id") or "") in wanted:
+            out.extend(str(i) for i in (op.get("deletes") or {}).get("node_ids") or [])
+    return out
+
+
 @op_clocked
 async def compact_retired(
     queue: Any, graph_id: str,
@@ -570,19 +587,26 @@ async def compact_retired(
     them (the scan is O(journal), never O(spines)), then one `spine-compaction` fact per spine --
     journaled, then applied: its segments deleted from the live db, the spine stamped compacted --
     and only then the storage move, then the static re-scan (must be 0; the facts' deletes are the
-    tolerated residue). A dry run is a reader: no lock, the scan only."""
+    tolerated residue). A compaction crashed between its facts and its move is COMPLETED here
+    (ruling 9d57273a): the journaled facts' deletes join the plan with no new fact, so whatever
+    they left in the cold segments moves now. A dry run is a reader: no lock, the scan only."""
+    source_ids = list(source_ids)
     if dry_run:
         targets = await _compaction_targets(queue, graph_id, source_ids)
         ids = [i for t in targets for i in t["segment_ids"]]
+        own = set(ids)
+        ids += [i for i in _journaled_compaction_ids(journal_path, source_ids) if i not in own]
         report = compact_journal(journal_path, archive_dir, ids, label=label, dry_run=True, actor=actor)
         return {"report": report, "targets": targets, "deleted": 0, "dangling_after": 0}
     async with graph_writer(queue, graph_id, journal_path) as w:
         targets = await _compaction_targets(queue, graph_id, source_ids)
         ids = [i for t in targets for i in t["segment_ids"]]
+        pending = _journaled_compaction_ids(journal_path, source_ids)
         report = await compact_family(
             w, archive_dir, ids,
             lambda plan: _compaction_ops(targets, plan.archive_path if plan.moves else None,
                                          label, actor),
-            label=label, actor=actor)
+            label=label, actor=actor, journaled_ids=pending)
+    swept = ids + pending
     return {"report": report, "targets": targets, "deleted": len(ids),
-            "dangling_after": len(scan_references(journal_path, ids)) if ids else 0}
+            "dangling_after": len(scan_references(journal_path, swept)) if swept else 0}

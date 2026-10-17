@@ -656,10 +656,10 @@ async def run_decomp(
                 status = "aborted"
                 break
 
-            # The extension and the Derivation it plans from what the extension added: one
-            # unit of work (ruling 6683f49e (1)).
+            # The extension and the Derivation planned from its own adds: ONE atomic unit
+            # (ruling 3b76b63c) -- a crash leaves both or neither, so a retry re-plans both.
             async with write_window(queue, cfg.graph_capability, graph_journal_path,
-                                    what="spine-extension"):
+                                    what="spine-extension", unit=True):
                 res = await journal_extend(queue, cfg.graph_capability, nodes, edges,
                                            journal_path=graph_journal_path, verb="spine-extension",
                                            actor="pipeline:cjm-transcript-decomp-core", run=run_id,

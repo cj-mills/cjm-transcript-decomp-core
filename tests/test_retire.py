@@ -273,10 +273,13 @@ def test_plan_superseded_and_compact(monkeypatch, tmp_path):
     # the fact was journaled BEFORE the move, carrying the deletes its apply ran (6683f49e (3))
     assert fam[-1]["deletes"] == {"node_ids": [f"seg-{H_OLD[-3:]}-{k}" for k in range(3)]}
     assert not any(n["id"].startswith(f"seg-{H_OLD[-3:]}") for o in fam for n in (o.get("wires") or {}).get("nodes", []))
-    # a second compaction finds nothing to do
+    # a second compaction finds nothing to do: L1's journaled fact is re-planned (ruling 9d57273a),
+    # but its ids carry no wires any more, so nothing moves and no fact is written
+    n_ops = len(read_journal(str(jp)))
     again = asyncio.run(R.compact_retired(g, "graph", ["src"], journal_path=str(jp), archive_dir=str(tmp_path / "archive"),
                                           label="L2", actor="t"))
-    assert again["targets"] == [] and again["report"].ops_scanned == 0
+    assert again["targets"] == [] and again["report"].retired_ids_seen == 0
+    assert again["report"].nodes_archived == 0 and len(read_journal(str(jp))) == n_ops
 
 
 def test_compaction_ops_plan_two_spines_of_one_source_cumulatively():

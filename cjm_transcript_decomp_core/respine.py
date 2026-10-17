@@ -65,7 +65,8 @@ from cjm_transcript_decomp_core.runs import DecompIndex
 from cjm_transcript_graph_schema.schema import (external_config_hash, external_transcriber_name,
                                                 RESPINE_OP_VERB, RespinedChunkEntry,
                                                 SEGMENT_SUPERSEDED_BY_PROP, source_node_id,
-                                                SOURCE_RESPINED_CHUNKS_PROP, TranscriptGraphLabels)
+                                                SOURCE_RESPINED_CHUNKS_PROP, transcript_node_id,
+                                                TranscriptGraphLabels)
 from cjm_transcription_core.chunk import (apply_chunk_update, derive_manifest,
                                           land_chunk_transcript, load_run_manifest,
                                           prior_config_hash, PRODUCER_EXTERNAL,
@@ -318,15 +319,18 @@ async def live_chunk_segments(
     queue: Any, graph_id: str,
     rendition_id: str,      # The chunk's AudioRendition (the chunk's fine segments hang under it)
     skeleton_hash: str,     # The live spine
+    exclude_salt: Optional[str] = None,  # A respine's own salt (its Transcript id): its segments are never the chunk's old ones
 ) -> List[Dict[str, Any]]:  # {"id","index","start_time","end_time"} rows, index order
-    """The chunk's LIVE segments: PART_OF its rendition, on the spine, not superseded."""
-    q = NodeQuery(label=TranscriptGraphLabels.SEGMENT, project=["index", "start_time", "end_time"],
+    """The chunk's LIVE segments: PART_OF its rendition, on the spine, not superseded -- less the
+    segments a respine salted with `exclude_salt` (its extension landed, its fact not yet)."""
+    q = NodeQuery(label=TranscriptGraphLabels.SEGMENT, project=["index", "start_time", "end_time", "identity_salt"],
                   where=[PropertyPredicate("skeleton_hash", "eq", skeleton_hash),
                          PropertyPredicate(SEGMENT_SUPERSEDED_BY_PROP, "is_null")],
                   related=RelationPredicate(SpineRelations.PART_OF, node_id=rendition_id))
     rows = _rows(await graph_task(queue, graph_id, "query_nodes", query=q.to_dict()))
     return sorted(({"id": r["id"], "index": int(r.get("index") or 0),
-                    "start_time": r.get("start_time"), "end_time": r.get("end_time")} for r in rows),
+                    "start_time": r.get("start_time"), "end_time": r.get("end_time")} for r in rows
+                   if not exclude_salt or r.get("identity_salt") != exclude_salt),
                   key=lambda r: r["index"])
 
 
@@ -335,18 +339,21 @@ async def live_spine_index(
     rendition_ids: List[str],  # Every rendition of the source
     skeleton_hash: str,        # The live spine
     page: int = 5000,
+    exclude_salt: Optional[str] = None,  # A respine's own salt: its landed segments are not yet the spine's
 ) -> List[Tuple[str, int]]:  # (id, index) of every live segment, index order
-    """The whole live spine's (id, index) — the renumber plan's input."""
+    """The whole live spine's (id, index) — the renumber plan's input, less the segments a respine
+    salted with `exclude_salt` (a retry plans the renumber its first attempt planned)."""
     where = [PropertyPredicate("skeleton_hash", "eq", skeleton_hash),
              PropertyPredicate(SEGMENT_SUPERSEDED_BY_PROP, "is_null")]
     out: List[Tuple[str, int]] = []
     after: Optional[str] = None  # keyset pages on the id, never OFFSET (finding ae2b196e)
     while True:
-        q = NodeQuery(label=TranscriptGraphLabels.SEGMENT, project=["index"], where=where,
+        q = NodeQuery(label=TranscriptGraphLabels.SEGMENT, project=["index", "identity_salt"], where=where,
                       related=RelationPredicate(SpineRelations.PART_OF, node_ids=list(rendition_ids)),
                       limit=page, after=after)
         rows = _rows(await graph_task(queue, graph_id, "query_nodes", query=q.to_dict()))
-        out.extend((r["id"], int(r.get("index") or 0)) for r in rows)
+        out.extend((r["id"], int(r.get("index") or 0)) for r in rows
+                   if not exclude_salt or r.get("identity_salt") != exclude_salt)
         if len(rows) < page:
             break
         after = rows[-1]["id"]
@@ -482,11 +489,12 @@ async def respine_chunk(
 
     THE CHAIN IS ONE UNIT OF WORK (ruling 6683f49e (1), 547f4123 (1)): one write window holds
     the family's writer from the dependents gate to the fact, so every refusal is planned on a db
-    holding its whole journal and each op -- the landing, the extension, its Derivation, the
-    transfer's corrections, the fact -- is planned on what the one before it left, journaled,
-    then applied. A crash mid-chain leaves the appended ops for the next writer's heal, and a
-    re-run re-plans the remainder (the landing collides into its Transcript, the fact's op id
-    catches a completed respine). The lock is held across the policy stack's load and the
+    holding its whole journal and each op -- the landing, the extension with its Derivation (one
+    atomic unit, ruling 3b76b63c), the transfer's corrections, the fact -- is planned on what the
+    one before it left, journaled, then applied. A crash mid-chain leaves the appended ops for the
+    next writer's heal, and a re-run re-plans the remainder (the chunk is read under the writer,
+    less the segments this respine's salt already landed; the landing collides into its
+    Transcript; the fact's op id catches a completed respine). The lock is held across the policy stack's load and the
     re-derivation, so another writer of the workflow journal waits for the chunk. A dry run is a
     reader and opens no writer."""
     if dry_run:
@@ -529,11 +537,6 @@ async def _respine_chunk(
     """`respine_chunk`'s chain, run inside its write window (or, dry, as a reader)."""
     source_id = source_node_id(str(ctx["source_entry"].get("content_hash") or ""))
     skeleton_hash: str = ctx["skeleton_hash"]
-    old = ctx["old_segments"]
-    if not old:
-        raise ValueError("the chunk has no live segments on this spine — nothing to replace "
-                         "(an un-decomposed or empty chunk is a whole-source decomp's job)")
-    old_ids = [r["id"] for r in old]
     text = (text or "").strip()
     if not text:
         raise ValueError("the pasted text is empty")
@@ -541,6 +544,19 @@ async def _respine_chunk(
     warning = wordwrap_warning(shape)
     tname = external_transcriber_name(model_id)
     chash = external_config_hash(model_id, prompt_hash)
+    # This respine's own Transcript id -- its segments' salt, its fact's op id -- is known before
+    # the landing, so the chunk is read HERE, under the writer, less any segments an earlier attempt
+    # already extended it with: a retry plans exactly what the first attempt planned (547f4123).
+    own = transcript_node_id(ctx["rendition"], tname, chash)
+    old = await live_chunk_segments(queue, graph_id, ctx["rendition"], skeleton_hash, exclude_salt=own)
+    src_node = await get_source(queue, graph_id, source_id)
+    existing_entries = [e for e in ((src_node or {}).get("properties") or {}).get(SOURCE_RESPINED_CHUNKS_PROP) or []
+                        if isinstance(e, dict)]
+    done = any(str(e.get("op_id") or "") == respine_op_id(source_id, own) for e in existing_entries)
+    if not old and not done:
+        raise ValueError("the chunk has no live segments on this spine — nothing to replace "
+                         "(an un-decomposed or empty chunk is a whole-source decomp's job)")
+    old_ids = [r["id"] for r in old]
     tm = ctx["transcription_manifest"]
     seg = ctx["chunk_entry"]
     src_entry = ctx["source_entry"]
@@ -561,10 +577,7 @@ async def _respine_chunk(
                          f"in this env (install cjm-transcript-correction-core beside decomp-core, or pass "
                          f"--strand to strand them)")
 
-    # Idempotency: the same transcript already respined this chunk -> a verified no-op.
-    src_node = await get_source(queue, graph_id, source_id)
-    existing_entries = [e for e in ((src_node or {}).get("properties") or {}).get(SOURCE_RESPINED_CHUNKS_PROP) or []
-                        if isinstance(e, dict)]
+    # Idempotency: the same transcript already respined this chunk -> a verified no-op (read above).
     # A prior landing under the same (model, prompt) collides into the same Transcript id
     # at the landing (extend-verify); the respine of it is caught below by op id.
     prior_hash = prior_config_hash(tm, seg, tname)
@@ -685,7 +698,7 @@ async def _respine_chunk(
                              "aligned to nothing (check the paste against the chunk's audio)")
 
         # 3. EXTEND the live spine: salted ids, the chunk's first index onward.
-        spine_rows = await live_spine_index(queue, graph_id, ctx["renditions"], skeleton_hash)
+        spine_rows = await live_spine_index(queue, graph_id, ctx["renditions"], skeleton_hash, exclude_salt=own)
         old_idx = [r["index"] for r in old]
         tail = [(sid, i) for sid, i in spine_rows if i > max(old_idx)]
         first, delta, renumber = plan_renumber(old_idx, len(aligned), tail)
@@ -699,22 +712,26 @@ async def _respine_chunk(
         next_id = next((sid for sid, i in spine_rows if i > max(old_idx)), None)
         edges.extend(bridge_edges(prev_id, ids["segments"], next_id))
         new_ids = list(ids["segments"])
-        res = await journal_extend(queue, graph_id, nodes, edges, journal_path=journal_path,
-                                   verb="spine-extension", actor="pipeline:cjm-transcript-decomp-core",
-                                   run=run_id,
-                                   args={"act": "chunk-respine", "source_id": source_id,
-                                         "audio_segment": ctx["audio_segment"], "transcript": transcript_id,
-                                         "segments": len(new_ids), "text_from": text_from,
-                                         "skeleton_hash": skeleton_hash})
-        if res.nodes_added:
-            d = Derivation(actor="host:cjm-transcript-decomp-core", method="alignment-fold/v1",
-                           input_ids=ids["transcripts_used"], output_ids=[source_id],
-                           properties={"run_id": run_id, "segments": len(new_ids), "text_from": text_from,
-                                       "act": "chunk-respine", "audio_segment": ctx["audio_segment"]})
-            dn, de = derivation_to_graph(d)
-            await journal_extend(queue, graph_id, [dn], de, journal_path=journal_path, verb="derivation",
-                                 actor="pipeline:cjm-transcript-decomp-core", run=run_id,
-                                 args={"method": "alignment-fold/v1", "act": "chunk-respine"})
+        # The extension and the Derivation planned from its own adds: ONE atomic unit (ruling
+        # 3b76b63c), opened INSIDE the chain's writer, so it lands at its own close -- the
+        # chain's other links (the landing, the transfer, the fact) stay op by op.
+        async with write_window(queue, graph_id, journal_path, what="chunk-respine", unit=True):
+            res = await journal_extend(queue, graph_id, nodes, edges, journal_path=journal_path,
+                                       verb="spine-extension", actor="pipeline:cjm-transcript-decomp-core",
+                                       run=run_id,
+                                       args={"act": "chunk-respine", "source_id": source_id,
+                                             "audio_segment": ctx["audio_segment"], "transcript": transcript_id,
+                                             "segments": len(new_ids), "text_from": text_from,
+                                             "skeleton_hash": skeleton_hash})
+            if res.nodes_added:
+                d = Derivation(actor="host:cjm-transcript-decomp-core", method="alignment-fold/v1",
+                               input_ids=ids["transcripts_used"], output_ids=[source_id],
+                               properties={"run_id": run_id, "segments": len(new_ids), "text_from": text_from,
+                                           "act": "chunk-respine", "audio_segment": ctx["audio_segment"]})
+                dn, de = derivation_to_graph(d)
+                await journal_extend(queue, graph_id, [dn], de, journal_path=journal_path, verb="derivation",
+                                     actor="pipeline:cjm-transcript-decomp-core", run=run_id,
+                                     args={"method": "alignment-fold/v1", "act": "chunk-respine"})
         vr = await verify_source(queue, graph_id, source_id, [ctx["rendition"]], segment_ids=new_ids)
         _journal_run_event(manager, SubstrateEventType.VERIFY_OUTCOME.value, run_id, actor, {
             "core": "cjm-transcript-decomp-core", "kind": "respine-chunk", "source_node_id": source_id,

@@ -106,8 +106,8 @@ A frontend-agnostic core for the transcript decomposition workflow — composes 
 - `decomp_config_from` _function_ — Rebuild the live spine's DecompConfig from its manifest snapshot (pure): the
 - `describe_dependents` _function_ — The refusal / readout listing (pure).
 - `find_decomp_manifest` _function_ — The decomp run that minted the live spine (pure): the newest manifest whose
-- `live_chunk_segments` _function_ — The chunk's LIVE segments: PART_OF its rendition, on the spine, not superseded.
-- `live_spine_index` _function_ — The whole live spine's (id, index) — the renumber plan's input.
+- `live_chunk_segments` _function_ — The chunk's LIVE segments: PART_OF its rendition, on the spine, not superseded -- less the
+- `live_spine_index` _function_ — The whole live spine's (id, index) — the renumber plan's input, less the segments a respine
 - `plan_renumber` _function_ — The renumber plan (pure; 0b4d5cfa (4), the 'do it properly' ruling): the new
 - `read_dependents` _function_ — What points at the old segments: every Correction with a CORRECTS edge into
 - `render_chunk_prompt` _function_ — Mode one (--prompt): the chunk's escalation prompt WITH CONTEXT — no writes.
